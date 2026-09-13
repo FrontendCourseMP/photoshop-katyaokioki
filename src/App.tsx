@@ -13,6 +13,7 @@ import { rgbToLab } from './core/color';
 import { decodeGb7, encodeGb7 } from './core/gb7';
 import { imageBitmapToImageData, getDepthFromImageData } from './core/image';
 import { applyLevelsToImageData, createDefaultLevels, normalizeLevelConfig, type LevelsChannel, type LevelsSettings } from './core/levels';
+import { INTERPOLATION_MODES, resizeImageData, type InterpolationMode } from './core/interpolation';
 import { useImageStore } from './store/imageStore';
 
 async function loadImageFile(file: File): Promise<ImageData> {
@@ -49,6 +50,8 @@ export default function App() {
   const [levelsSettings, setLevelsSettings] = useState<LevelsSettings>(createDefaultLevels());
   const [levelsPreviewEnabled, setLevelsPreviewEnabled] = useState(true);
   const [histogramMode, setHistogramMode] = useState<'linear' | 'log'>('linear');
+  const [scalePercent, setScalePercent] = useState(100);
+  const [resizeMode, setResizeMode] = useState<InterpolationMode>('bilinear');
 
   const getMaxLevelValue = () => (current?.depth === 1 ? 127 : 255);
 
@@ -83,6 +86,7 @@ export default function App() {
 
     setChannelSelection(getDefaultChannelSelection(current.imageData));
     setLevelsSettings(createDefaultLevels(getMaxLevelValue()));
+    setScalePercent(100);
   }, [current]);
 
   useEffect(() => {
@@ -165,6 +169,24 @@ export default function App() {
 
       return next;
     });
+  };
+
+  const handleScaleChange = (percent: number) => {
+    if (!current) {
+      return;
+    }
+
+    const nextPercent = Math.max(12, Math.min(300, Number(percent) || 100));
+    const targetWidth = Math.max(1, Math.round(current.imageData.width * (nextPercent / 100)));
+    const targetHeight = Math.max(1, Math.round(current.imageData.height * (nextPercent / 100)));
+    const scaledImage = resizeImageData(current.imageData, targetWidth, targetHeight, resizeMode);
+
+    setCurrent({
+      ...current,
+      imageData: scaledImage
+    });
+    setScalePercent(nextPercent);
+    setStatusText(`Масштаб: ${nextPercent}% • ${targetWidth}×${targetHeight}`);
   };
 
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -361,6 +383,36 @@ export default function App() {
             }}
           >
             <canvas ref={canvasRef} className="main-canvas" onClick={handleCanvasClick} style={{ cursor: activeTool === 'eyedropper' ? 'crosshair' : 'default' }} />
+
+            <Box sx={{ alignSelf: 'stretch', background: '#fff', border: '1px solid #dadada', borderRadius: 1, p: 1.5, display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
+              <Box component="label" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Typography variant="caption">Масштаб</Typography>
+                <select
+                  value={scalePercent}
+                  onChange={(event) => handleScaleChange(Number(event.target.value))}
+                  disabled={!current}
+                  style={{ minWidth: 110, padding: '6px 8px', borderRadius: 6, border: '1px solid #d0d0d0' }}
+                >
+                  {[12, 25, 50, 75, 100, 125, 150, 200, 300].map((value) => (
+                    <option key={value} value={value}>{value}%</option>
+                  ))}
+                </select>
+              </Box>
+
+              <Box component="label" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Typography variant="caption">Интерполяция</Typography>
+                <select
+                  value={resizeMode}
+                  onChange={(event) => setResizeMode(event.target.value as InterpolationMode)}
+                  disabled={!current}
+                  style={{ minWidth: 170, padding: '6px 8px', borderRadius: 6, border: '1px solid #d0d0d0' }}
+                >
+                  {INTERPOLATION_MODES.map((mode) => (
+                    <option key={mode} value={mode}>{mode === 'nearest' ? 'Ближайший сосед' : 'Билинейная'}</option>
+                  ))}
+                </select>
+              </Box>
+            </Box>
 
             {pickerInfo && (
               <Box sx={{ alignSelf: 'stretch', background: '#fff', border: '1px solid #dadada', borderRadius: 1, p: 1.5 }}>
