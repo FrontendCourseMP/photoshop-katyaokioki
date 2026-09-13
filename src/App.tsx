@@ -8,6 +8,7 @@ import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import { ChannelPanel } from './components/ChannelPanel';
 import { LevelsDialog } from './components/LevelsDialog';
+import { ResizeDialog } from './components/ResizeDialog';
 import { applyChannelSelection, getDefaultChannelSelection, type ChannelKey, type ChannelSelection } from './core/channel';
 import { rgbToLab } from './core/color';
 import { decodeGb7, encodeGb7 } from './core/gb7';
@@ -52,6 +53,7 @@ export default function App() {
   const [histogramMode, setHistogramMode] = useState<'linear' | 'log'>('linear');
   const [scalePercent, setScalePercent] = useState(100);
   const [resizeMode, setResizeMode] = useState<InterpolationMode>('bilinear');
+  const [resizeDialogOpen, setResizeDialogOpen] = useState(false);
 
   const getMaxLevelValue = () => (current?.depth === 1 ? 127 : 255);
 
@@ -187,6 +189,33 @@ export default function App() {
     });
     setScalePercent(nextPercent);
     setStatusText(`Масштаб: ${nextPercent}% • ${targetWidth}×${targetHeight}`);
+  };
+
+  const openResizeDialog = () => {
+    if (!current) {
+      return;
+    }
+
+    setResizeDialogOpen(true);
+  };
+
+  const applyResize = (nextWidth: number, nextHeight: number, interpolation: InterpolationMode) => {
+    if (!current) {
+      return;
+    }
+
+    const clampedWidth = Math.max(1, Math.min(10000, Math.round(nextWidth)));
+    const clampedHeight = Math.max(1, Math.min(10000, Math.round(nextHeight)));
+    const resized = resizeImageData(current.imageData, clampedWidth, clampedHeight, interpolation);
+
+    setCurrent({
+      ...current,
+      imageData: resized
+    });
+    setResizeDialogOpen(false);
+    setResizeMode(interpolation);
+    setScalePercent(Math.round((Math.max(clampedWidth, clampedHeight) / Math.max(current.imageData.width, current.imageData.height)) * 100));
+    setStatusText(`Размер изменён: ${clampedWidth}×${clampedHeight} • ${interpolation}`);
   };
 
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -333,6 +362,10 @@ export default function App() {
             Уровни
           </Button>
 
+          <Button variant="outlined" onClick={openResizeDialog} disabled={!current}>
+            Изменить размер
+          </Button>
+
           <Button variant="outlined" onClick={() => handleDownload('png')} disabled={!current}>
             PNG
           </Button>
@@ -360,6 +393,14 @@ export default function App() {
         onChannelChange={setLevelsChannel}
         onSettingChange={updateLevelsSetting}
         onHistogramModeChange={setHistogramMode}
+      />
+
+      <ResizeDialog
+        open={resizeDialogOpen}
+        imageWidth={current?.imageData.width ?? 0}
+        imageHeight={current?.imageData.height ?? 0}
+        onClose={() => setResizeDialogOpen(false)}
+        onApply={applyResize}
       />
 
       <Container maxWidth="xl" sx={{ flex: 1, py: 2, display: 'flex', justifyContent: 'center', alignItems: 'stretch' }}>
