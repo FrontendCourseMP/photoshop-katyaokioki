@@ -7,11 +7,13 @@ import Container from '@mui/material/Container';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import { ChannelPanel } from './components/ChannelPanel';
+import { FilterDialog } from './components/FilterDialog';
 import { LevelsDialog } from './components/LevelsDialog';
 import { ResizeDialog } from './components/ResizeDialog';
 import { applyChannelSelection, getDefaultChannelSelection, type ChannelKey, type ChannelSelection } from './core/channel';
 import { rgbToLab } from './core/color';
 import { decodeGb7, encodeGb7 } from './core/gb7';
+import { DEFAULT_CHANNEL_SELECTION, applyKernelAsync, getPresetKernel, type ChannelSelectionMap, type PaddingMode } from './core/convolution';
 import { imageBitmapToImageData, getDepthFromImageData } from './core/image';
 import { applyLevelsToImageData, createDefaultLevels, normalizeLevelConfig, type LevelsChannel, type LevelsSettings } from './core/levels';
 import { INTERPOLATION_MODES, resizeImageData, type InterpolationMode } from './core/interpolation';
@@ -54,6 +56,12 @@ export default function App() {
   const [scalePercent, setScalePercent] = useState(100);
   const [resizeMode, setResizeMode] = useState<InterpolationMode>('bilinear');
   const [resizeDialogOpen, setResizeDialogOpen] = useState(false);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filterPreviewEnabled, setFilterPreviewEnabled] = useState(true);
+  const [filterPresetId, setFilterPresetId] = useState('identity');
+  const [filterKernel, setFilterKernel] = useState<number[][]>(getPresetKernel('identity'));
+  const [filterChannels, setFilterChannels] = useState<ChannelSelectionMap>({ ...DEFAULT_CHANNEL_SELECTION });
+  const [filterPadding, setFilterPadding] = useState<PaddingMode>('black');
 
   const getMaxLevelValue = () => (current?.depth === 1 ? 127 : 255);
 
@@ -103,8 +111,23 @@ export default function App() {
     const renderPreview = () => {
       if (levelsOpen && levelsPreviewEnabled) {
         const preview = applyLevelsToImageData(basePreview, levelsSettings, levelsChannel, getMaxLevelValue());
+        renderedImageRef.current = preview;
         drawCurrentImage(preview);
         return;
+      }
+
+      if (filterOpen && filterPreviewEnabled) {
+        let cancelled = false;
+        void applyKernelAsync(basePreview, filterKernel, filterChannels, filterPadding).then((preview) => {
+          if (!cancelled) {
+            renderedImageRef.current = preview;
+            drawCurrentImage(preview);
+          }
+        });
+
+        return () => {
+          cancelled = true;
+        };
       }
 
       drawCurrentImage(basePreview);
@@ -127,7 +150,7 @@ export default function App() {
       }
       window.removeEventListener('resize', resizeCanvas);
     };
-  }, [current, channelSelection, levelsOpen, levelsPreviewEnabled, levelsSettings, levelsChannel]);
+  }, [current, channelSelection, levelsOpen, levelsPreviewEnabled, levelsSettings, levelsChannel, filterOpen, filterPreviewEnabled, filterKernel, filterChannels, filterPadding]);
 
   const handleFileLoad = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -300,6 +323,19 @@ export default function App() {
     setLevelsOpen(true);
   };
 
+  const openFilterDialog = () => {
+    if (!current) {
+      return;
+    }
+
+    setFilterPresetId('identity');
+    setFilterKernel(getPresetKernel('identity'));
+    setFilterChannels({ ...DEFAULT_CHANNEL_SELECTION });
+    setFilterPadding('black');
+    setFilterPreviewEnabled(true);
+    setFilterOpen(true);
+  };
+
   const applyLevels = () => {
     if (!current) {
       return;
@@ -324,6 +360,38 @@ export default function App() {
     drawCurrentImage(renderedImageRef.current ?? current.imageData);
   };
 
+  const applyFilter = () => {
+    if (!current) {
+      return;
+    }
+
+    void applyKernelAsync(current.imageData, filterKernel, filterChannels, filterPadding).then((result) => {
+      setCurrent({
+        ...current,
+        imageData: result
+      });
+      setFilterOpen(false);
+      setStatusText('Фильтр применён');
+    });
+  };
+
+  const cancelFilter = () => {
+    if (!current) {
+      return;
+    }
+
+    setFilterOpen(false);
+    setFilterPreviewEnabled(false);
+    drawCurrentImage(renderedImageRef.current ?? current.imageData);
+  };
+
+  const resetFilter = () => {
+    setFilterPresetId('identity');
+    setFilterKernel(getPresetKernel('identity'));
+    setFilterChannels({ ...DEFAULT_CHANNEL_SELECTION });
+    setFilterPadding('black');
+  };
+
   const resetLevels = () => {
     const maxValue = getMaxLevelValue();
     setLevelsSettings(createDefaultLevels(maxValue));
@@ -334,6 +402,26 @@ export default function App() {
     setLevelsSettings((prev) => ({
       ...prev,
       [channel]: normalizeLevelConfig({ ...prev[channel], [field]: value }, maxValue)
+    }));
+  };
+
+  const handleFilterPresetChange = (presetId: string) => {
+    setFilterPresetId(presetId);
+    setFilterKernel(getPresetKernel(presetId));
+  };
+
+  const handleFilterKernelChange = (row: number, col: number, value: number) => {
+    setFilterKernel((prev) => {
+      const next = prev.map((line) => [...line]);
+      next[row][col] = value;
+      return next;
+    });
+  };
+
+  const handleFilterChannelToggle = (channel: keyof ChannelSelectionMap, value: boolean) => {
+    setFilterChannels((prev) => ({
+      ...prev,
+      [channel]: value
     }));
   };
 
@@ -360,6 +448,10 @@ export default function App() {
 
           <Button variant="outlined" onClick={openLevelsDialog} disabled={!current}>
             Уровни
+          </Button>
+
+          <Button variant="outlined" onClick={openFilterDialog} disabled={!current}>
+            Фильтры
           </Button>
 
           <Button variant="outlined" onClick={openResizeDialog} disabled={!current}>
@@ -393,6 +485,24 @@ export default function App() {
         onChannelChange={setLevelsChannel}
         onSettingChange={updateLevelsSetting}
         onHistogramModeChange={setHistogramMode}
+      />
+
+      <FilterDialog
+        open={filterOpen}
+        imageData={current?.imageData ?? null}
+        presetId={filterPresetId}
+        kernel={filterKernel}
+        channels={filterChannels}
+        padding={filterPadding}
+        previewEnabled={filterPreviewEnabled}
+        onClose={cancelFilter}
+        onApply={applyFilter}
+        onReset={resetFilter}
+        onPreviewToggle={setFilterPreviewEnabled}
+        onPresetChange={handleFilterPresetChange}
+        onKernelChange={handleFilterKernelChange}
+        onChannelToggle={handleFilterChannelToggle}
+        onPaddingChange={setFilterPadding}
       />
 
       <ResizeDialog
