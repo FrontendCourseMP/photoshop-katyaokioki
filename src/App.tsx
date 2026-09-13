@@ -8,6 +8,7 @@ import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import { ChannelPanel } from './components/ChannelPanel';
 import { applyChannelSelection, getDefaultChannelSelection, type ChannelKey, type ChannelSelection } from './core/channel';
+import { rgbToLab } from './core/color';
 import { decodeGb7, encodeGb7 } from './core/gb7';
 import { imageBitmapToImageData, getDepthFromImageData } from './core/image';
 import { useImageStore } from './store/imageStore';
@@ -37,6 +38,9 @@ export default function App() {
   const setCurrent = useImageStore((state) => state.setCurrent);
   const [statusText, setStatusText] = useState('Нет изображения');
   const [channelSelection, setChannelSelection] = useState<ChannelSelection>({});
+  const [activeTool, setActiveTool] = useState<'move' | 'eyedropper'>('move');
+  const [pickerInfo, setPickerInfo] = useState<{ x: number; y: number; r: number; g: number; b: number; l: number; a: number; bChannel: number } | null>(null);
+  const renderedImageRef = useRef<ImageData | null>(null);
 
   const drawCurrentImage = (imageData: ImageData) => {
     const canvas = canvasRef.current;
@@ -78,6 +82,7 @@ export default function App() {
 
     const selection = Object.keys(channelSelection).length > 0 ? channelSelection : getDefaultChannelSelection(current.imageData);
     const previewData = applyChannelSelection(current.imageData, selection);
+    renderedImageRef.current = previewData;
     drawCurrentImage(previewData);
 
     const resizeCanvas = () => {
@@ -132,6 +137,43 @@ export default function App() {
     });
   };
 
+  const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!current || activeTool !== 'eyedropper') {
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = Math.floor((event.clientX - rect.left) * scaleX);
+    const y = Math.floor((event.clientY - rect.top) * scaleY);
+
+    const displayData = renderedImageRef.current ?? current.imageData;
+    const pixelIndex = (y * displayData.width + x) * 4;
+    const r = displayData.data[pixelIndex] ?? 0;
+    const g = displayData.data[pixelIndex + 1] ?? 0;
+    const b = displayData.data[pixelIndex + 2] ?? 0;
+    const lab = rgbToLab({ r, g, b });
+
+    setPickerInfo({
+      x,
+      y,
+      r,
+      g,
+      b,
+      l: Number(lab.l.toFixed(2)),
+      a: Number(lab.a.toFixed(2)),
+      bChannel: Number(lab.b.toFixed(2))
+    });
+
+    setStatusText(`Пипетка: X=${x}, Y=${y} • RGB=(${r}, ${g}, ${b})`);
+  };
+
   const handleDownload = async (format: 'png' | 'jpg' | 'gb7') => {
     if (!current) {
       return;
@@ -178,6 +220,14 @@ export default function App() {
             <input type="file" hidden accept=".png,.jpg,.jpeg,.gb7,image/png,image/jpeg" onChange={handleFileLoad} ref={inputRef} />
           </Button>
 
+          <Button
+            variant={activeTool === 'eyedropper' ? 'contained' : 'outlined'}
+            onClick={() => setActiveTool((prev) => (prev === 'eyedropper' ? 'move' : 'eyedropper'))}
+            disabled={!current}
+          >
+            Пипетка
+          </Button>
+
           <Button variant="outlined" onClick={() => handleDownload('png')} disabled={!current}>
             PNG
           </Button>
@@ -199,16 +249,34 @@ export default function App() {
             sx={{
               flex: 1,
               display: 'flex',
+              flexDirection: 'column',
               alignItems: 'center',
               justifyContent: 'center',
               background: 'linear-gradient(45deg, #e0e0e0 25%, transparent 25%), linear-gradient(-45deg, #e0e0e0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #e0e0e0 75%), linear-gradient(-45deg, transparent 75%, #e0e0e0 75%)',
               backgroundSize: '24px 24px',
               backgroundPosition: '0 0, 0 12px, 12px -12px, -12px 0',
               overflow: 'auto',
-              p: 2
+              p: 2,
+              gap: 1
             }}
           >
-            <canvas ref={canvasRef} className="main-canvas" />
+            <canvas ref={canvasRef} className="main-canvas" onClick={handleCanvasClick} style={{ cursor: activeTool === 'eyedropper' ? 'crosshair' : 'default' }} />
+
+            {pickerInfo && (
+              <Box sx={{ alignSelf: 'stretch', background: '#fff', border: '1px solid #dadada', borderRadius: 1, p: 1.5 }}>
+                <Typography variant="body2" sx={{ fontWeight: 700, mb: 0.5 }}>Пипетка</Typography>
+                <Stack direction="row" spacing={2} flexWrap="wrap">
+                  <Typography variant="caption">X: {pickerInfo.x}</Typography>
+                  <Typography variant="caption">Y: {pickerInfo.y}</Typography>
+                  <Typography variant="caption">R: {pickerInfo.r}</Typography>
+                  <Typography variant="caption">G: {pickerInfo.g}</Typography>
+                  <Typography variant="caption">B: {pickerInfo.b}</Typography>
+                  <Typography variant="caption">L*: {pickerInfo.l}</Typography>
+                  <Typography variant="caption">a*: {pickerInfo.a}</Typography>
+                  <Typography variant="caption">b*: {pickerInfo.bChannel}</Typography>
+                </Stack>
+              </Box>
+            )}
           </Box>
         </Box>
       </Container>
