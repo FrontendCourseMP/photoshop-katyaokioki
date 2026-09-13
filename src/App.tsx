@@ -7,10 +7,12 @@ import Container from '@mui/material/Container';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import { ChannelPanel } from './components/ChannelPanel';
+import { LevelsDialog } from './components/LevelsDialog';
 import { applyChannelSelection, getDefaultChannelSelection, type ChannelKey, type ChannelSelection } from './core/channel';
 import { rgbToLab } from './core/color';
 import { decodeGb7, encodeGb7 } from './core/gb7';
 import { imageBitmapToImageData, getDepthFromImageData } from './core/image';
+import { applyLevelsToImageData, createDefaultLevels, normalizeLevelConfig, type LevelsChannel, type LevelsSettings } from './core/levels';
 import { useImageStore } from './store/imageStore';
 
 async function loadImageFile(file: File): Promise<ImageData> {
@@ -41,6 +43,14 @@ export default function App() {
   const [activeTool, setActiveTool] = useState<'move' | 'eyedropper'>('move');
   const [pickerInfo, setPickerInfo] = useState<{ x: number; y: number; r: number; g: number; b: number; l: number; a: number; bChannel: number } | null>(null);
   const renderedImageRef = useRef<ImageData | null>(null);
+  const renderFrameRef = useRef<number | null>(null);
+  const [levelsOpen, setLevelsOpen] = useState(false);
+  const [levelsChannel, setLevelsChannel] = useState<LevelsChannel>('master');
+  const [levelsSettings, setLevelsSettings] = useState<LevelsSettings>(createDefaultLevels());
+  const [levelsPreviewEnabled, setLevelsPreviewEnabled] = useState(true);
+  const [histogramMode, setHistogramMode] = useState<'linear' | 'log'>('linear');
+
+  const getMaxLevelValue = () => (current?.depth === 1 ? 127 : 255);
 
   const drawCurrentImage = (imageData: ImageData) => {
     const canvas = canvasRef.current;
@@ -72,26 +82,46 @@ export default function App() {
     }
 
     setChannelSelection(getDefaultChannelSelection(current.imageData));
+    setLevelsSettings(createDefaultLevels(getMaxLevelValue()));
   }, [current]);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !current) {
+    if (!current) {
       return;
     }
 
     const selection = Object.keys(channelSelection).length > 0 ? channelSelection : getDefaultChannelSelection(current.imageData);
-    const previewData = applyChannelSelection(current.imageData, selection);
-    renderedImageRef.current = previewData;
-    drawCurrentImage(previewData);
+    const basePreview = applyChannelSelection(current.imageData, selection);
+    renderedImageRef.current = basePreview;
+
+    const renderPreview = () => {
+      if (levelsOpen && levelsPreviewEnabled) {
+        const preview = applyLevelsToImageData(basePreview, levelsSettings, levelsChannel, getMaxLevelValue());
+        drawCurrentImage(preview);
+        return;
+      }
+
+      drawCurrentImage(basePreview);
+    };
+
+    if (renderFrameRef.current) {
+      cancelAnimationFrame(renderFrameRef.current);
+    }
+
+    renderFrameRef.current = requestAnimationFrame(renderPreview);
 
     const resizeCanvas = () => {
-      drawCurrentImage(previewData);
+      renderPreview();
     };
 
     window.addEventListener('resize', resizeCanvas);
-    return () => window.removeEventListener('resize', resizeCanvas);
-  }, [current, channelSelection]);
+    return () => {
+      if (renderFrameRef.current) {
+        cancelAnimationFrame(renderFrameRef.current);
+      }
+      window.removeEventListener('resize', resizeCanvas);
+    };
+  }, [current, channelSelection, levelsOpen, levelsPreviewEnabled, levelsSettings, levelsChannel]);
 
   const handleFileLoad = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -207,6 +237,55 @@ export default function App() {
     setStatusText(`Файл сохранён: ${anchor.download}`);
   };
 
+  const openLevelsDialog = () => {
+    if (!current) {
+      return;
+    }
+
+    const maxValue = getMaxLevelValue();
+    setLevelsSettings(createDefaultLevels(maxValue));
+    setLevelsChannel('master');
+    setLevelsPreviewEnabled(true);
+    setLevelsOpen(true);
+  };
+
+  const applyLevels = () => {
+    if (!current) {
+      return;
+    }
+
+    const transformed = applyLevelsToImageData(current.imageData, levelsSettings, levelsChannel, getMaxLevelValue());
+    setCurrent({
+      ...current,
+      imageData: transformed
+    });
+    setLevelsOpen(false);
+    setStatusText('Уровни применены');
+  };
+
+  const cancelLevels = () => {
+    if (!current) {
+      return;
+    }
+
+    setLevelsOpen(false);
+    setLevelsPreviewEnabled(false);
+    drawCurrentImage(renderedImageRef.current ?? current.imageData);
+  };
+
+  const resetLevels = () => {
+    const maxValue = getMaxLevelValue();
+    setLevelsSettings(createDefaultLevels(maxValue));
+  };
+
+  const updateLevelsSetting = (channel: LevelsChannel, field: 'black' | 'white' | 'gamma', value: number) => {
+    const maxValue = getMaxLevelValue();
+    setLevelsSettings((prev) => ({
+      ...prev,
+      [channel]: normalizeLevelConfig({ ...prev[channel], [field]: value }, maxValue)
+    }));
+  };
+
   return (
     <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#fafafa' }}>
       <AppBar position="static" color="default" elevation={1}>
@@ -228,6 +307,10 @@ export default function App() {
             Пипетка
           </Button>
 
+          <Button variant="outlined" onClick={openLevelsDialog} disabled={!current}>
+            Уровни
+          </Button>
+
           <Button variant="outlined" onClick={() => handleDownload('png')} disabled={!current}>
             PNG
           </Button>
@@ -239,6 +322,23 @@ export default function App() {
           </Button>
         </Toolbar>
       </AppBar>
+
+      <LevelsDialog
+        open={levelsOpen}
+        imageData={current?.imageData ?? null}
+        maxValue={getMaxLevelValue()}
+        activeChannel={levelsChannel}
+        settings={levelsSettings}
+        previewEnabled={levelsPreviewEnabled}
+        histogramMode={histogramMode}
+        onClose={cancelLevels}
+        onApply={applyLevels}
+        onReset={resetLevels}
+        onTogglePreview={setLevelsPreviewEnabled}
+        onChannelChange={setLevelsChannel}
+        onSettingChange={updateLevelsSetting}
+        onHistogramModeChange={setHistogramMode}
+      />
 
       <Container maxWidth="xl" sx={{ flex: 1, py: 2, display: 'flex', justifyContent: 'center', alignItems: 'stretch' }}>
         <Box sx={{ display: 'flex', width: '100%', height: '100%', minHeight: 420, borderRadius: 2, border: '1px solid #d0d0d0', overflow: 'hidden', background: '#ffffff' }}>
