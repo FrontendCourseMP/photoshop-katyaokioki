@@ -1,4 +1,4 @@
 * { box-sizing: border-box; }
-html,body,#root { height: 100%; margin: 0; }
-body { font-family: Inter, Roboto, sans-serif; }
-.main-canvas { background: #333; display: block; margin: 20px auto; }
+html, body, #root { height: 100%; margin: 0; }
+body { font-family: Inter, Roboto, 'Segoe UI', sans-serif; }
+canvas { display: block; max-width: 100%; max-height: 70vh; background: #ffffff; border: 2px solid #bfbfbf; border-radius: 8px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08); }
