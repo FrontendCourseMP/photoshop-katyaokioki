@@ -2,7 +2,7 @@
 
 Проект для курса "Технологии компьютерной графики" — лабораторные работы по обработке изображений.
 
-Хостинг GitHub Pages: https://frontendcoursempl.github.io/photoshop-katyaokioki/
+Хостинг https://photoshop-katyaokioki.onrender.com/
 
 Лабораторная 1: цифровое представление изображения.
 - загрузка PNG, JPG, GB7
