@@ -6,6 +6,8 @@ import Button from '@mui/material/Button';
 import Container from '@mui/material/Container';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
+import { ChannelPanel } from './components/ChannelPanel';
+import { applyChannelSelection, getDefaultChannelSelection, type ChannelKey, type ChannelSelection } from './core/channel';
 import { decodeGb7, encodeGb7 } from './core/gb7';
 import { imageBitmapToImageData, getDepthFromImageData } from './core/image';
 import { useImageStore } from './store/imageStore';
@@ -30,12 +32,11 @@ function buildFileName(baseName: string, extension: 'png' | 'jpg' | 'gb7'): stri
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const original = useImageStore((state) => state.original);
   const current = useImageStore((state) => state.current);
   const setOriginal = useImageStore((state) => state.setOriginal);
   const setCurrent = useImageStore((state) => state.setCurrent);
-  const resetCurrent = useImageStore((state) => state.resetCurrent);
   const [statusText, setStatusText] = useState('Нет изображения');
+  const [channelSelection, setChannelSelection] = useState<ChannelSelection>({});
 
   const drawCurrentImage = (imageData: ImageData) => {
     const canvas = canvasRef.current;
@@ -54,7 +55,7 @@ export default function App() {
 
     const canvasWrap = canvas.parentElement;
     if (canvasWrap) {
-      const maxWidth = Math.min(canvasWrap.clientWidth - 20, window.innerWidth * 0.9);
+      const maxWidth = Math.min(canvasWrap.clientWidth - 10, window.innerWidth * 0.8);
       const maxHeight = Math.min(window.innerHeight * 0.7, imageData.height * 1.2);
       canvas.style.width = `${Math.min(imageData.width, maxWidth)}px`;
       canvas.style.height = `${Math.min(imageData.height, maxHeight)}px`;
@@ -62,23 +63,30 @@ export default function App() {
   };
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) {
+    if (!current) {
       return;
     }
 
-    const resizeCanvas = () => {
-      if (!current) {
-        return;
-      }
+    setChannelSelection(getDefaultChannelSelection(current.imageData));
+  }, [current]);
 
-      drawCurrentImage(current.imageData);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !current) {
+      return;
+    }
+
+    const selection = Object.keys(channelSelection).length > 0 ? channelSelection : getDefaultChannelSelection(current.imageData);
+    const previewData = applyChannelSelection(current.imageData, selection);
+    drawCurrentImage(previewData);
+
+    const resizeCanvas = () => {
+      drawCurrentImage(previewData);
     };
 
-    resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
     return () => window.removeEventListener('resize', resizeCanvas);
-  }, [current]);
+  }, [current, channelSelection]);
 
   const handleFileLoad = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -97,7 +105,6 @@ export default function App() {
 
       setOriginal(image);
       setCurrent(image);
-      drawCurrentImage(imageData);
       setStatusText(`${file.name} • ${imageData.width}×${imageData.height} • глубина ${depth}`);
     } catch (error) {
       console.error(error);
@@ -105,6 +112,24 @@ export default function App() {
     } finally {
       event.target.value = '';
     }
+  };
+
+  const handleChannelToggle = (key: ChannelKey) => {
+    if (!current) {
+      return;
+    }
+
+    setChannelSelection((prev) => {
+      const base = getDefaultChannelSelection(current.imageData);
+      const next = { ...base, ...prev, [key]: !(prev[key] ?? base[key] ?? true) };
+
+      const activeChannels = Object.keys(next).filter((entryKey) => next[entryKey as ChannelKey] !== false);
+      if (activeChannels.length === 0) {
+        return { ...base, [key]: true };
+      }
+
+      return next;
+    });
   };
 
   const handleDownload = async (format: 'png' | 'jpg' | 'gb7') => {
@@ -165,26 +190,26 @@ export default function App() {
         </Toolbar>
       </AppBar>
 
-      <Container maxWidth="xl" sx={{ flex: 1, py: 2, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-        <Box
-          className="canvas-shell"
-          sx={{
-            width: '100%',
-            height: '100%',
-            minHeight: 420,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: 'linear-gradient(45deg, #e0e0e0 25%, transparent 25%), linear-gradient(-45deg, #e0e0e0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #e0e0e0 75%), linear-gradient(-45deg, transparent 75%, #e0e0e0 75%)',
-            backgroundSize: '24px 24px',
-            backgroundPosition: '0 0, 0 12px, 12px -12px, -12px 0',
-            borderRadius: 2,
-            border: '1px solid #d0d0d0',
-            overflow: 'auto',
-            p: 2
-          }}
-        >
-          <canvas ref={canvasRef} className="main-canvas" />
+      <Container maxWidth="xl" sx={{ flex: 1, py: 2, display: 'flex', justifyContent: 'center', alignItems: 'stretch' }}>
+        <Box sx={{ display: 'flex', width: '100%', height: '100%', minHeight: 420, borderRadius: 2, border: '1px solid #d0d0d0', overflow: 'hidden', background: '#ffffff' }}>
+          {current && <ChannelPanel imageData={current.imageData} selection={channelSelection} onToggle={handleChannelToggle} />}
+
+          <Box
+            className="canvas-shell"
+            sx={{
+              flex: 1,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: 'linear-gradient(45deg, #e0e0e0 25%, transparent 25%), linear-gradient(-45deg, #e0e0e0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #e0e0e0 75%), linear-gradient(-45deg, transparent 75%, #e0e0e0 75%)',
+              backgroundSize: '24px 24px',
+              backgroundPosition: '0 0, 0 12px, 12px -12px, -12px 0',
+              overflow: 'auto',
+              p: 2
+            }}
+          >
+            <canvas ref={canvasRef} className="main-canvas" />
+          </Box>
         </Box>
       </Container>
 
