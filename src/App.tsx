@@ -10,7 +10,7 @@ import { ChannelPanel } from './components/ChannelPanel';
 import { FilterDialog } from './components/FilterDialog';
 import { LevelsDialog } from './components/LevelsDialog';
 import { ResizeDialog } from './components/ResizeDialog';
-import { applyChannelSelection, getDefaultChannelSelection, type ChannelKey, type ChannelSelection } from './core/channel';
+import { applyChannelSelection, getDefaultChannelSelection, isGrayscaleImage, type ChannelKey, type ChannelSelection } from './core/channel';
 import { rgbToLab } from './core/color';
 import { decodeGb7, encodeGb7 } from './core/gb7';
 import { DEFAULT_CHANNEL_SELECTION, applyKernelAsync, getPresetKernel, type ChannelSelectionMap, type PaddingMode } from './core/convolution';
@@ -56,6 +56,7 @@ export default function App() {
   const [scalePercent, setScalePercent] = useState(100);
   const [resizeMode, setResizeMode] = useState<InterpolationMode>('bilinear');
   const [resizeDialogOpen, setResizeDialogOpen] = useState(false);
+  const originalSizeRef = useRef<{ width: number; height: number } | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterPreviewEnabled, setFilterPreviewEnabled] = useState(true);
   const [filterPresetId, setFilterPresetId] = useState('identity');
@@ -96,7 +97,14 @@ export default function App() {
 
     setChannelSelection(getDefaultChannelSelection(current.imageData));
     setLevelsSettings(createDefaultLevels(getMaxLevelValue()));
-    setScalePercent(100);
+
+    if (!originalSizeRef.current || originalSizeRef.current.width === 0 || originalSizeRef.current.height === 0) {
+      originalSizeRef.current = { width: current.imageData.width, height: current.imageData.height };
+    }
+
+    const reference = originalSizeRef.current ?? current.imageData;
+    const nextPercent = Math.round((Math.max(current.imageData.width, current.imageData.height) / Math.max(reference.width, reference.height)) * 100);
+    setScalePercent(Math.max(12, Math.min(300, nextPercent || 100)));
   }, [current]);
 
   useEffect(() => {
@@ -167,6 +175,7 @@ export default function App() {
         depth
       };
 
+      originalSizeRef.current = { width: imageData.width, height: imageData.height };
       setOriginal(image);
       setCurrent(image);
       setStatusText(`${file.name} • ${imageData.width}×${imageData.height} • глубина ${depth}`);
@@ -201,9 +210,10 @@ export default function App() {
       return;
     }
 
+    const reference = originalSizeRef.current ?? { width: current.imageData.width, height: current.imageData.height };
     const nextPercent = Math.max(12, Math.min(300, Number(percent) || 100));
-    const targetWidth = Math.max(1, Math.round(current.imageData.width * (nextPercent / 100)));
-    const targetHeight = Math.max(1, Math.round(current.imageData.height * (nextPercent / 100)));
+    const targetWidth = Math.max(1, Math.round(reference.width * (nextPercent / 100)));
+    const targetHeight = Math.max(1, Math.round(reference.height * (nextPercent / 100)));
     const scaledImage = resizeImageData(current.imageData, targetWidth, targetHeight, resizeMode);
 
     setCurrent({
@@ -286,7 +296,8 @@ export default function App() {
     let blob: Blob;
 
     if (format === 'gb7') {
-      blob = new Blob([encodeGb7(current.imageData, current.depth === 2 || current.depth === 1 ? false : true)], { type: 'application/octet-stream' });
+      const hasAlpha = current.imageData.data.some((value, index) => index % 4 === 3 && value !== 255);
+      blob = new Blob([encodeGb7(current.imageData, hasAlpha)], { type: 'application/octet-stream' });
     } else {
       const exportCanvas = document.createElement('canvas');
       exportCanvas.width = current.imageData.width;
@@ -419,10 +430,19 @@ export default function App() {
   };
 
   const handleFilterChannelToggle = (channel: keyof ChannelSelectionMap, value: boolean) => {
-    setFilterChannels((prev) => ({
-      ...prev,
-      [channel]: value
-    }));
+    setFilterChannels((prev) => {
+      const next = { ...prev };
+
+      if (current && isGrayscaleImage(current.imageData) && (channel === 'red' || channel === 'green' || channel === 'blue')) {
+        next.red = value;
+        next.green = value;
+        next.blue = value;
+        return next;
+      }
+
+      next[channel] = value;
+      return next;
+    });
   };
 
   return (

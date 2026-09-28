@@ -16,15 +16,15 @@ export function decodeGb7(buffer: ArrayBuffer): ImageData {
   const flags = bytes[5];
   const width = (bytes[6] << 8) | bytes[7];
   const height = (bytes[8] << 8) | bytes[9];
-  const pixelCount = width * height;
-  const expectedLength = headerLength + pixelCount;
-
-  if (bytes.length < expectedLength) {
-    throw new Error('Некорректная длина данных GB7.');
-  }
 
   if (version !== 1) {
     throw new Error(`Поддерживается только GB7 v1, получена версия ${version}.`);
+  }
+
+  const pixelCount = width * height;
+  const expectedLength = headerLength + pixelCount;
+  if (bytes.length < expectedLength) {
+    throw new Error('Некорректная длина данных GB7.');
   }
 
   const hasMask = (flags & 0x01) === 1;
@@ -36,9 +36,9 @@ export function decodeGb7(buffer: ArrayBuffer): ImageData {
     const gray = value & 0x7f;
     const alpha = hasMask ? (value & 0x80 ? 255 : 0) : 255;
     const offset = i * 4;
-    rgba[offset] = gray;
-    rgba[offset + 1] = gray;
-    rgba[offset + 2] = gray;
+    rgba[offset] = gray * 2;
+    rgba[offset + 1] = gray * 2;
+    rgba[offset + 2] = gray * 2;
     rgba[offset + 3] = alpha;
   }
 
@@ -69,12 +69,15 @@ export function encodeGb7(imageData: ImageData, withMask = true): Uint8Array {
     const g = data[offset + 1];
     const b = data[offset + 2];
     const a = data[offset + 3] ?? 255;
+
     const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
     let gray = Math.round((luminance / 255) * 127);
     gray = Math.max(0, Math.min(127, gray));
 
     let value = gray;
-    if (withMask && a > 127) {
+    if (withMask && a < 128) {
+      value &= 0x7f;
+    } else if (withMask) {
       value |= 0x80;
     }
 

@@ -6,6 +6,7 @@ import FormControlLabel from '@mui/material/FormControlLabel';
 import Slider from '@mui/material/Slider';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
+import { getChannelDescriptor, isGrayscaleImage } from '../core/channel';
 import { LEVEL_CHANNELS, getHistogramData, getLogHistogramData, type LevelsChannel, type LevelsSettings } from '../core/levels';
 
 type Props = {
@@ -59,12 +60,17 @@ export function LevelsDialog({
     return null;
   }
 
-  const channelConfig = settings[activeChannel];
+  const isGray = isGrayscaleImage(imageData);
+  const channelOptions: LevelsChannel[] = isGray ? ['master', 'alpha'] : ['master', 'red', 'green', 'blue', 'alpha'];
+  const safeChannel = channelOptions.includes(activeChannel) ? activeChannel : 'master';
+  const channelConfig = settings[safeChannel];
   const series = {
     master: getHistogramData(imageData, 'master', maxValue),
-    red: getHistogramData(imageData, 'red', maxValue),
-    green: getHistogramData(imageData, 'green', maxValue),
-    blue: getHistogramData(imageData, 'blue', maxValue),
+    ...(isGray ? {} : {
+      red: getHistogramData(imageData, 'red', maxValue),
+      green: getHistogramData(imageData, 'green', maxValue),
+      blue: getHistogramData(imageData, 'blue', maxValue)
+    }),
     alpha: getHistogramData(imageData, 'alpha', maxValue)
   };
 
@@ -81,7 +87,7 @@ export function LevelsDialog({
     blue: '#1976d2',
     alpha: '#7b1fa2'
   };
-  const channelLabel = activeChannel === 'master' ? 'Master' : activeChannel;
+  const channelLabel = safeChannel === 'master' ? 'Master' : safeChannel;
   const histogramLabel = histogramMode === 'linear' ? 'Линейный' : 'Логарифмический';
 
   return (
@@ -102,11 +108,11 @@ export function LevelsDialog({
               <Box component="label" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 <Typography variant="caption">Канал</Typography>
                 <select
-                  value={activeChannel}
+                  value={safeChannel}
                   onChange={(event) => onChannelChange(event.target.value as LevelsChannel)}
                   style={{ minWidth: 120, padding: '6px 10px', borderRadius: 6, border: '1px solid #d0d0d0', background: '#fff' }}
                 >
-                  {LEVEL_CHANNELS.map((channel) => (
+                  {channelOptions.map((channel) => (
                     <option key={channel} value={channel}>
                       {channel === 'master' ? 'Master' : channel}
                     </option>
@@ -130,7 +136,7 @@ export function LevelsDialog({
             <Box sx={{ height: 220, border: '1px solid #ddd', borderRadius: 1, p: 1, background: '#fbfbfb', overflow: 'hidden' }}>
               <svg width="100%" height="100%" viewBox={`0 0 ${Math.max(256, (maxValue + 1) * 2.2)} 100`} preserveAspectRatio="none" style={{ display: 'block' }}>
                 {bars.map((bar) => {
-                  const isActive = bar.key === activeChannel || bar.key === 'master';
+                  const isActive = bar.key === safeChannel || bar.key === 'master';
                   const opacity = isActive ? 1 : 0.25;
                   const color = colorMap[bar.key];
 
@@ -159,17 +165,17 @@ export function LevelsDialog({
             <Stack spacing={2}>
               <Box>
                 <Typography variant="caption">Чёрная точка</Typography>
-                <Slider value={channelConfig.black} onChange={(_, value) => onSettingChange(activeChannel, 'black', Number(value))} min={0} max={maxValue} step={1} valueLabelDisplay="auto" />
+                <Slider value={channelConfig.black} onChange={(_, value) => onSettingChange(safeChannel, 'black', Number(value))} min={0} max={maxValue} step={1} valueLabelDisplay="auto" />
               </Box>
 
               <Box>
                 <Typography variant="caption">Белая точка</Typography>
-                <Slider value={channelConfig.white} onChange={(_, value) => onSettingChange(activeChannel, 'white', Number(value))} min={0} max={maxValue} step={1} valueLabelDisplay="auto" />
+                <Slider value={channelConfig.white} onChange={(_, value) => onSettingChange(safeChannel, 'white', Number(value))} min={0} max={maxValue} step={1} valueLabelDisplay="auto" />
               </Box>
 
               <Box>
                 <Typography variant="caption">Гамма</Typography>
-                <Slider value={channelConfig.gamma} onChange={(_, value) => onSettingChange(activeChannel, 'gamma', Number(value))} min={0.1} max={9.9} step={0.1} valueLabelDisplay="auto" />
+                <Slider value={channelConfig.gamma} onChange={(_, value) => onSettingChange(safeChannel, 'gamma', Number(value))} min={0.1} max={9.9} step={0.1} valueLabelDisplay="auto" />
               </Box>
 
               <FormControlLabel

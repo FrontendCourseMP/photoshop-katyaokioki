@@ -49,6 +49,19 @@ export function getChannelDescriptor(imageData: ImageData): { keys: ChannelKey[]
   };
 }
 
+export function isGrayscaleImage(imageData: ImageData): boolean {
+  const { data, width, height } = imageData;
+
+  for (let i = 0; i < width * height; i += 1) {
+    const offset = i * 4;
+    if (data[offset] !== data[offset + 1] || data[offset + 1] !== data[offset + 2]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 export function getDefaultChannelSelection(imageData: ImageData): ChannelSelection {
   const { keys } = getChannelDescriptor(imageData);
   const selection: ChannelSelection = {};

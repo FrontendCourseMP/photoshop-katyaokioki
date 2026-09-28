@@ -5,6 +5,7 @@ import Checkbox from '@mui/material/Checkbox';
 import FormControlLabel from '@mui/material/FormControlLabel';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
+import { isGrayscaleImage } from '../core/channel';
 import { DEFAULT_CHANNEL_SELECTION, KERNEL_PRESETS, type ChannelSelectionMap, type PaddingMode } from '../core/convolution';
 
 type FilterDialogProps = {
@@ -59,6 +60,9 @@ export function FilterDialog({
   if (!imageData) {
     return null;
   }
+
+  const isGray = isGrayscaleImage(imageData);
+  const channelEntries = isGray ? (['red', 'alpha'] as const) : (['red', 'green', 'blue', 'alpha'] as const);
 
   const changeKernelValue = (row: number, col: number, inputValue: string) => {
     const parsed = Number(inputValue);
@@ -118,11 +122,11 @@ export function FilterDialog({
           </Box>
 
           <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-            {(['red', 'green', 'blue', 'alpha'] as const).map((channel) => (
+            {channelEntries.map((channel) => (
               <FormControlLabel
                 key={channel}
                 control={<Checkbox checked={channels[channel]} onChange={(event) => onChannelToggle(channel, event.target.checked)} />}
-                label={channel === 'red' ? 'Красный' : channel === 'green' ? 'Зелёный' : channel === 'blue' ? 'Синий' : 'Альфа'}
+                label={channel === 'red' ? (isGray ? 'Светлость' : 'Красный') : channel === 'green' ? 'Зелёный' : channel === 'blue' ? 'Синий' : 'Альфа'}
               />
             ))}
           </Box>
