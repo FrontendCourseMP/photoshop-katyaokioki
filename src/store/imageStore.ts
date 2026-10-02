@@ -1,23 +1,27 @@
 import { create } from 'zustand';
+import type { SourceInfo } from '../core/formats';
+import type { RasterImage } from '../core/raster';
 
-export type StoredImage = {
-  imageData: ImageData;
-  sourceName: string;
-  depth: number;
-};
-
+/**
+ * Документ редактора: исходное изображение (не изменяется) и текущее.
+ * Масштаб отображения хранится отдельно и пиксели не меняет.
+ */
 type ImageStore = {
-  original: StoredImage | null;
-  current: StoredImage | null;
-  setOriginal: (image: StoredImage) => void;
-  setCurrent: (image: StoredImage) => void;
-  resetCurrent: () => void;
+  original: RasterImage | null;
+  image: RasterImage | null;
+  fileName: string;
+  info: SourceInfo | null;
+  open: (image: RasterImage, fileName: string, info: SourceInfo) => void;
+  setImage: (image: RasterImage) => void;
+  revert: () => void;
 };
 
 export const useImageStore = create<ImageStore>((set, get) => ({
   original: null,
-  current: null,
-  setOriginal: (image) => set({ original: image, current: image }),
-  setCurrent: (image) => set({ current: image }),
-  resetCurrent: () => set({ current: get().original })
+  image: null,
+  fileName: '',
+  info: null,
+  open: (image, fileName, info) => set({ original: image, image, fileName, info }),
+  setImage: (image) => set({ image }),
+  revert: () => set({ image: get().original })
 }));

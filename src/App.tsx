@@ -1,617 +1,309 @@
-import { useEffect, useRef, useState } from 'react';
-import AppBar from '@mui/material/AppBar';
-import Toolbar from '@mui/material/Toolbar';
-import Typography from '@mui/material/Typography';
-import Button from '@mui/material/Button';
-import Container from '@mui/material/Container';
-import Box from '@mui/material/Box';
-import Stack from '@mui/material/Stack';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChannelPanel } from './components/ChannelPanel';
 import { FilterDialog } from './components/FilterDialog';
+import { InfoPanel, type PickedColor } from './components/InfoPanel';
 import { LevelsDialog } from './components/LevelsDialog';
+import { MenuBar, type Menu } from './components/MenuBar';
 import { ResizeDialog } from './components/ResizeDialog';
-import { applyChannelSelection, getDefaultChannelSelection, isGrayscaleImage, type ChannelKey, type ChannelSelection } from './core/channel';
+import { StatusBar } from './components/StatusBar';
+import { Workspace, clampPercent, type Tool, type ViewState } from './components/Workspace';
 import { rgbToLab } from './core/color';
-import { decodeGb7, encodeGb7 } from './core/gb7';
-import { DEFAULT_CHANNEL_SELECTION, applyKernelAsync, getPresetKernel, type ChannelSelectionMap, type PaddingMode } from './core/convolution';
-import { imageBitmapToImageData, getDepthFromImageData } from './core/image';
-import { applyLevelsToImageData, createDefaultLevels, normalizeLevelConfig, type LevelsChannel, type LevelsSettings } from './core/levels';
-import { INTERPOLATION_MODES, resizeImageData, type InterpolationMode } from './core/interpolation';
+import { encodeImage, loadImageFile, type SaveFormat } from './core/formats';
+import { DEFAULT_INTERPOLATION, getInterpolator, resizeRaster } from './core/interpolation';
+import { composeForDisplay, getChannelKeys, readPixel, type ChannelKey, type ChannelVisibility, type RasterImage } from './core/raster';
 import { useImageStore } from './store/imageStore';
 
-async function loadImageFile(file: File): Promise<ImageData> {
-  const fileName = file.name.toLowerCase();
+type DialogId = 'levels' | 'filter' | 'resize' | null;
 
-  if (fileName.endsWith('.gb7')) {
-    const buffer = await file.arrayBuffer();
-    return decodeGb7(buffer);
+/** Отступ от краёв окна при начальном вписывании изображения. */
+const FIT_MARGIN = 50;
+
+function fitView(image: RasterImage, viewport: { width: number; height: number }): ViewState {
+  const kx = (viewport.width - FIT_MARGIN * 2) / image.width;
+  const ky = (viewport.height - FIT_MARGIN * 2) / image.height;
+  const percent = clampPercent(Math.floor(Math.min(kx, ky) * 100));
+  return { percent, cx: image.width / 2, cy: image.height / 2 };
+}
+
+const TOOLS: { id: Tool; label: string; key: string; icon: JSX.Element }[] = [
+  {
+    id: 'hand',
+    label: 'Рука — перемещение вида',
+    key: 'H',
+    icon: (
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M18 11V6a2 2 0 0 0-4 0v5M14 10V4a2 2 0 0 0-4 0v6M10 10.5V6a2 2 0 0 0-4 0v8" />
+        <path d="M18 8a2 2 0 0 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15" />
+      </svg>
+    )
+  },
+  {
+    id: 'eyedropper',
+    label: 'Пипетка',
+    key: 'I',
+    icon: (
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="m2 22 1-1h3l9-9" />
+        <path d="M3 21v-3l9-9" />
+        <path d="m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 1 3-3l.4.4Z" />
+      </svg>
+    )
   }
-
-  const bitmap = await createImageBitmap(file);
-  return imageBitmapToImageData(bitmap);
-}
-
-function buildFileName(baseName: string, extension: 'png' | 'jpg' | 'gb7'): string {
-  const clean = baseName.replace(/\.[^.]+$/, '');
-  return `${clean}.${extension}`;
-}
+];
 
 export default function App() {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const { image, original, fileName, info, open, setImage, revert } = useImageStore();
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const current = useImageStore((state) => state.current);
-  const setOriginal = useImageStore((state) => state.setOriginal);
-  const setCurrent = useImageStore((state) => state.setCurrent);
-  const [statusText, setStatusText] = useState('Нет изображения');
-  const [channelSelection, setChannelSelection] = useState<ChannelSelection>({});
-  const [activeTool, setActiveTool] = useState<'move' | 'eyedropper'>('move');
-  const [pickerInfo, setPickerInfo] = useState<{ x: number; y: number; r: number; g: number; b: number; l: number; a: number; bChannel: number } | null>(null);
-  const renderedImageRef = useRef<ImageData | null>(null);
-  const renderFrameRef = useRef<number | null>(null);
-  const [levelsOpen, setLevelsOpen] = useState(false);
-  const [levelsChannel, setLevelsChannel] = useState<LevelsChannel>('master');
-  const [levelsSettings, setLevelsSettings] = useState<LevelsSettings>(createDefaultLevels());
-  const [levelsPreviewEnabled, setLevelsPreviewEnabled] = useState(true);
-  const [histogramMode, setHistogramMode] = useState<'linear' | 'log'>('linear');
-  const [scalePercent, setScalePercent] = useState(100);
-  const [resizeMode, setResizeMode] = useState<InterpolationMode>('bilinear');
-  const [resizeDialogOpen, setResizeDialogOpen] = useState(false);
-  const originalSizeRef = useRef<{ width: number; height: number } | null>(null);
-  const [filterOpen, setFilterOpen] = useState(false);
-  const [filterPreviewEnabled, setFilterPreviewEnabled] = useState(true);
-  const [filterPresetId, setFilterPresetId] = useState('identity');
-  const [filterKernel, setFilterKernel] = useState<number[][]>(getPresetKernel('identity'));
-  const [filterChannels, setFilterChannels] = useState<ChannelSelectionMap>({ ...DEFAULT_CHANNEL_SELECTION });
-  const [filterPadding, setFilterPadding] = useState<PaddingMode>('black');
+  const viewportRef = useRef({ width: 800, height: 600 });
 
-  const getMaxLevelValue = () => (current?.depth === 1 ? 127 : 255);
+  const [view, setView] = useState<ViewState>({ percent: 100, cx: 0, cy: 0 });
+  const [interpolation, setInterpolation] = useState<string>(DEFAULT_INTERPOLATION);
+  const [visibility, setVisibility] = useState<ChannelVisibility>({});
+  const [tool, setTool] = useState<Tool>('hand');
+  const [picked, setPicked] = useState<PickedColor | null>(null);
+  const [dialog, setDialog] = useState<DialogId>(null);
+  const [preview, setPreview] = useState<RasterImage | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('Откройте изображение: Файл → Открыть или перетащите файл в окно');
 
-  const drawCurrentImage = (imageData: ImageData) => {
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      return;
-    }
+  // то, что сейчас показывается: предпросмотр инструмента или текущее изображение
+  const displayed = preview ?? image;
+  const rgba = useMemo(() => (displayed ? composeForDisplay(displayed, visibility) : null), [displayed, visibility]);
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      return;
-    }
+  const handleViewportResize = useCallback((size: { width: number; height: number }) => {
+    viewportRef.current = size;
+  }, []);
 
-    canvas.width = imageData.width;
-    canvas.height = imageData.height;
-    ctx.putImageData(imageData, 0, 0);
-
-    const canvasWrap = canvas.parentElement;
-    if (canvasWrap) {
-      const maxWidth = Math.min(canvasWrap.clientWidth - 10, window.innerWidth * 0.8);
-      const maxHeight = Math.min(window.innerHeight * 0.7, imageData.height * 1.2);
-      canvas.style.width = `${Math.min(imageData.width, maxWidth)}px`;
-      canvas.style.height = `${Math.min(imageData.height, maxHeight)}px`;
-    }
-  };
-
-  useEffect(() => {
-    if (!current) {
-      return;
-    }
-
-    setChannelSelection(getDefaultChannelSelection(current.imageData));
-    setLevelsSettings(createDefaultLevels(getMaxLevelValue()));
-
-    if (!originalSizeRef.current || originalSizeRef.current.width === 0 || originalSizeRef.current.height === 0) {
-      originalSizeRef.current = { width: current.imageData.width, height: current.imageData.height };
-    }
-
-    const reference = originalSizeRef.current ?? current.imageData;
-    const nextPercent = Math.round((Math.max(current.imageData.width, current.imageData.height) / Math.max(reference.width, reference.height)) * 100);
-    setScalePercent(Math.max(12, Math.min(300, nextPercent || 100)));
-  }, [current]);
-
-  useEffect(() => {
-    if (!current) {
-      return;
-    }
-
-    const selection = Object.keys(channelSelection).length > 0 ? channelSelection : getDefaultChannelSelection(current.imageData);
-    const basePreview = applyChannelSelection(current.imageData, selection);
-    renderedImageRef.current = basePreview;
-
-    const renderPreview = () => {
-      if (levelsOpen && levelsPreviewEnabled) {
-        const preview = applyLevelsToImageData(basePreview, levelsSettings, levelsChannel, getMaxLevelValue());
-        renderedImageRef.current = preview;
-        drawCurrentImage(preview);
-        return;
-      }
-
-      if (filterOpen && filterPreviewEnabled) {
-        let cancelled = false;
-        void applyKernelAsync(basePreview, filterKernel, filterChannels, filterPadding).then((preview) => {
-          if (!cancelled) {
-            renderedImageRef.current = preview;
-            drawCurrentImage(preview);
-          }
-        });
-
-        return () => {
-          cancelled = true;
-        };
-      }
-
-      drawCurrentImage(basePreview);
-    };
-
-    if (renderFrameRef.current) {
-      cancelAnimationFrame(renderFrameRef.current);
-    }
-
-    renderFrameRef.current = requestAnimationFrame(renderPreview);
-
-    const resizeCanvas = () => {
-      renderPreview();
-    };
-
-    window.addEventListener('resize', resizeCanvas);
-    return () => {
-      if (renderFrameRef.current) {
-        cancelAnimationFrame(renderFrameRef.current);
-      }
-      window.removeEventListener('resize', resizeCanvas);
-    };
-  }, [current, channelSelection, levelsOpen, levelsPreviewEnabled, levelsSettings, levelsChannel, filterOpen, filterPreviewEnabled, filterKernel, filterChannels, filterPadding]);
-
-  const handleFileLoad = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) {
-      return;
-    }
-
+  const openFile = async (file: File) => {
     try {
-      const imageData = await loadImageFile(file);
-      const depth = getDepthFromImageData(imageData);
-      const image = {
-        imageData,
-        sourceName: file.name,
-        depth
-      };
-
-      originalSizeRef.current = { width: imageData.width, height: imageData.height };
-      setOriginal(image);
-      setCurrent(image);
-      setStatusText(`${file.name} • ${imageData.width}×${imageData.height} • глубина ${depth}`);
+      const loaded = await loadImageFile(file);
+      open(loaded.raster, file.name, loaded.info);
+      setVisibility({});
+      setPicked(null);
+      setPreview(null);
+      const nextView = fitView(loaded.raster, viewportRef.current);
+      setView(nextView);
+      setMessage(`Открыт файл ${file.name}`);
     } catch (error) {
       console.error(error);
-      setStatusText('Не удалось открыть файл. Проверьте формат изображения.');
-    } finally {
-      event.target.value = '';
+      setMessage(`Ошибка: ${error instanceof Error ? error.message : 'не удалось открыть файл'}`);
     }
   };
 
-  const handleChannelToggle = (key: ChannelKey) => {
-    if (!current) {
-      return;
+  const save = async (format: SaveFormat) => {
+    if (!image) return;
+    try {
+      const blob = await encodeImage(image, format);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${fileName.replace(/\.[^.]+$/, '') || 'image'}.${format}`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setMessage(`Сохранено: ${a.download}`);
+    } catch (error) {
+      setMessage(`Ошибка сохранения: ${error instanceof Error ? error.message : error}`);
     }
-
-    setChannelSelection((prev) => {
-      const base = getDefaultChannelSelection(current.imageData);
-      const next = { ...base, ...prev, [key]: !(prev[key] ?? base[key] ?? true) };
-
-      const activeChannels = Object.keys(next).filter((entryKey) => next[entryKey as ChannelKey] !== false);
-      if (activeChannels.length === 0) {
-        return { ...base, [key]: true };
-      }
-
-      return next;
-    });
   };
 
-  const handleScaleChange = (percent: number) => {
-    if (!current) {
+  const toggleChannel = (key: ChannelKey) => {
+    if (!image) return;
+    const keys = getChannelKeys(image);
+    const next = { ...visibility, [key]: visibility[key] === false };
+    if (keys.every((k) => next[k] === false)) {
+      setMessage('Хотя бы один канал должен быть включён');
       return;
     }
-
-    const reference = originalSizeRef.current ?? { width: current.imageData.width, height: current.imageData.height };
-    const nextPercent = Math.max(12, Math.min(300, Number(percent) || 100));
-    const targetWidth = Math.max(1, Math.round(reference.width * (nextPercent / 100)));
-    const targetHeight = Math.max(1, Math.round(reference.height * (nextPercent / 100)));
-    const scaledImage = resizeImageData(current.imageData, targetWidth, targetHeight, resizeMode);
-
-    setCurrent({
-      ...current,
-      imageData: scaledImage
-    });
-    setScalePercent(nextPercent);
-    setStatusText(`Масштаб: ${nextPercent}% • ${targetWidth}×${targetHeight}`);
+    setVisibility(next);
   };
 
-  const openResizeDialog = () => {
-    if (!current) {
-      return;
-    }
-
-    setResizeDialogOpen(true);
+  const pick = (x: number, y: number) => {
+    if (!displayed) return;
+    const p = readPixel(displayed, x, y);
+    setPicked({ x, y, r: p.r, g: p.g, b: p.b, alpha: p.alpha, raw: p.raw, bits: displayed.bits, lab: rgbToLab(p) });
   };
 
-  const applyResize = (nextWidth: number, nextHeight: number, interpolation: InterpolationMode) => {
-    if (!current) {
-      return;
-    }
+  const closeDialog = useCallback(() => {
+    setDialog(null);
+    setPreview(null);
+  }, []);
 
-    const clampedWidth = Math.max(1, Math.min(10000, Math.round(nextWidth)));
-    const clampedHeight = Math.max(1, Math.min(10000, Math.round(nextHeight)));
-    const resized = resizeImageData(current.imageData, clampedWidth, clampedHeight, interpolation);
-
-    setCurrent({
-      ...current,
-      imageData: resized
-    });
-    setResizeDialogOpen(false);
-    setResizeMode(interpolation);
-    setScalePercent(Math.round((Math.max(clampedWidth, clampedHeight) / Math.max(current.imageData.width, current.imageData.height)) * 100));
-    setStatusText(`Размер изменён: ${clampedWidth}×${clampedHeight} • ${interpolation}`);
+  const applyResult = (result: RasterImage, text: string) => {
+    setImage(result);
+    setPreview(null);
+    setDialog(null);
+    setMessage(text);
   };
 
-  const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!current || activeTool !== 'eyedropper') {
-      return;
-    }
-
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      return;
-    }
-
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const x = Math.floor((event.clientX - rect.left) * scaleX);
-    const y = Math.floor((event.clientY - rect.top) * scaleY);
-
-    const displayData = renderedImageRef.current ?? current.imageData;
-    const pixelIndex = (y * displayData.width + x) * 4;
-    const r = displayData.data[pixelIndex] ?? 0;
-    const g = displayData.data[pixelIndex + 1] ?? 0;
-    const b = displayData.data[pixelIndex + 2] ?? 0;
-    const lab = rgbToLab({ r, g, b });
-
-    setPickerInfo({
-      x,
-      y,
-      r,
-      g,
-      b,
-      l: Number(lab.l.toFixed(2)),
-      a: Number(lab.a.toFixed(2)),
-      bChannel: Number(lab.b.toFixed(2))
-    });
-
-    setStatusText(`Пипетка: X=${x}, Y=${y} • RGB=(${r}, ${g}, ${b})`);
+  const applyResize = (width: number, height: number, mode: string) => {
+    if (!image) return;
+    const resized = resizeRaster(image, width, height, mode);
+    setImage(resized);
+    setDialog(null);
+    // масштаб в строке состояния сохраняется, изображение центрируется
+    setView((v) => ({ ...v, cx: width / 2, cy: height / 2 }));
+    setMessage(`Размер изменён: ${image.width}×${image.height} → ${width}×${height} (${getInterpolator(mode).name})`);
   };
 
-  const handleDownload = async (format: 'png' | 'jpg' | 'gb7') => {
-    if (!current) {
-      return;
-    }
+  const zoomTo = (percent: number) => setView((v) => ({ ...v, percent: clampPercent(percent) }));
 
-    let blob: Blob;
-
-    if (format === 'gb7') {
-      const hasAlpha = current.imageData.data.some((value, index) => index % 4 === 3 && value !== 255);
-      blob = new Blob([encodeGb7(current.imageData, hasAlpha)], { type: 'application/octet-stream' });
-    } else {
-      const exportCanvas = document.createElement('canvas');
-      exportCanvas.width = current.imageData.width;
-      exportCanvas.height = current.imageData.height;
-      const ctx = exportCanvas.getContext('2d');
-      if (!ctx) {
+  // горячие клавиши
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (dialog || target.closest('input, select, textarea')) return;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'o') {
+        event.preventDefault();
+        inputRef.current?.click();
         return;
       }
-      ctx.putImageData(current.imageData, 0, 0);
-      const mimeType = format === 'png' ? 'image/png' : 'image/jpeg';
-      blob = await new Promise<Blob>((resolve) => {
-        exportCanvas.toBlob((result) => resolve(result ?? new Blob()), mimeType, 0.92);
-      });
+      if (!image || event.ctrlKey || event.metaKey || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (key === 'h' || key === 'р') setTool('hand');
+      if (key === 'i' || key === 'ш') setTool('eyedropper');
+      if (event.key === '+' || event.key === '=') zoomTo(view.percent * 1.25);
+      if (event.key === '-') zoomTo(view.percent / 1.25);
+      if (event.key === '0') setView(fitView(image, viewportRef.current));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dialog, image, view.percent]);
+
+  const noImage = !image;
+  const menus: Menu[] = [
+    {
+      label: 'Файл',
+      items: [
+        { label: 'Открыть…', shortcut: 'Ctrl+O', onSelect: () => inputRef.current?.click() },
+        { label: 'Сохранить как PNG', disabled: noImage, onSelect: () => save('png'), separatorBefore: true },
+        { label: 'Сохранить как JPG', disabled: noImage, onSelect: () => save('jpg') },
+        { label: 'Сохранить как GB7', disabled: noImage, onSelect: () => save('gb7') },
+        {
+          label: 'Вернуть исходное',
+          disabled: noImage || image === original,
+          separatorBefore: true,
+          onSelect: () => {
+            revert();
+            if (original) setView((v) => ({ ...v, cx: original.width / 2, cy: original.height / 2 }));
+            setMessage('Восстановлено исходное изображение');
+          }
+        }
+      ]
+    },
+    {
+      label: 'Изображение',
+      items: [
+        { label: 'Уровни…', disabled: noImage, onSelect: () => setDialog('levels') },
+        { label: 'Фильтр (ядро 3×3)…', disabled: noImage, onSelect: () => setDialog('filter') },
+        { label: 'Размер изображения…', disabled: noImage, onSelect: () => setDialog('resize'), separatorBefore: true }
+      ]
+    },
+    {
+      label: 'Вид',
+      items: [
+        { label: 'Вписать в окно', shortcut: '0', disabled: noImage, onSelect: () => image && setView(fitView(image, viewportRef.current)) },
+        { label: 'Реальный размер (100%)', disabled: noImage, onSelect: () => zoomTo(100) },
+        { label: 'Увеличить', shortcut: '+', disabled: noImage, onSelect: () => zoomTo(view.percent * 1.25) },
+        { label: 'Уменьшить', shortcut: '−', disabled: noImage, onSelect: () => zoomTo(view.percent / 1.25) }
+      ]
     }
-
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = buildFileName(current.sourceName, format);
-    anchor.click();
-    URL.revokeObjectURL(url);
-    setStatusText(`Файл сохранён: ${anchor.download}`);
-  };
-
-  const openLevelsDialog = () => {
-    if (!current) {
-      return;
-    }
-
-    const maxValue = getMaxLevelValue();
-    setLevelsSettings(createDefaultLevels(maxValue));
-    setLevelsChannel('master');
-    setLevelsPreviewEnabled(true);
-    setLevelsOpen(true);
-  };
-
-  const openFilterDialog = () => {
-    if (!current) {
-      return;
-    }
-
-    setFilterPresetId('identity');
-    setFilterKernel(getPresetKernel('identity'));
-    setFilterChannels({ ...DEFAULT_CHANNEL_SELECTION });
-    setFilterPadding('black');
-    setFilterPreviewEnabled(true);
-    setFilterOpen(true);
-  };
-
-  const applyLevels = () => {
-    if (!current) {
-      return;
-    }
-
-    const transformed = applyLevelsToImageData(current.imageData, levelsSettings, levelsChannel, getMaxLevelValue());
-    setCurrent({
-      ...current,
-      imageData: transformed
-    });
-    setLevelsOpen(false);
-    setStatusText('Уровни применены');
-  };
-
-  const cancelLevels = () => {
-    if (!current) {
-      return;
-    }
-
-    setLevelsOpen(false);
-    setLevelsPreviewEnabled(false);
-    drawCurrentImage(renderedImageRef.current ?? current.imageData);
-  };
-
-  const applyFilter = () => {
-    if (!current) {
-      return;
-    }
-
-    void applyKernelAsync(current.imageData, filterKernel, filterChannels, filterPadding).then((result) => {
-      setCurrent({
-        ...current,
-        imageData: result
-      });
-      setFilterOpen(false);
-      setStatusText('Фильтр применён');
-    });
-  };
-
-  const cancelFilter = () => {
-    if (!current) {
-      return;
-    }
-
-    setFilterOpen(false);
-    setFilterPreviewEnabled(false);
-    drawCurrentImage(renderedImageRef.current ?? current.imageData);
-  };
-
-  const resetFilter = () => {
-    setFilterPresetId('identity');
-    setFilterKernel(getPresetKernel('identity'));
-    setFilterChannels({ ...DEFAULT_CHANNEL_SELECTION });
-    setFilterPadding('black');
-  };
-
-  const resetLevels = () => {
-    const maxValue = getMaxLevelValue();
-    setLevelsSettings(createDefaultLevels(maxValue));
-  };
-
-  const updateLevelsSetting = (channel: LevelsChannel, field: 'black' | 'white' | 'gamma', value: number) => {
-    const maxValue = getMaxLevelValue();
-    setLevelsSettings((prev) => ({
-      ...prev,
-      [channel]: normalizeLevelConfig({ ...prev[channel], [field]: value }, maxValue)
-    }));
-  };
-
-  const handleFilterPresetChange = (presetId: string) => {
-    setFilterPresetId(presetId);
-    setFilterKernel(getPresetKernel(presetId));
-  };
-
-  const handleFilterKernelChange = (row: number, col: number, value: number) => {
-    setFilterKernel((prev) => {
-      const next = prev.map((line) => [...line]);
-      next[row][col] = value;
-      return next;
-    });
-  };
-
-  const handleFilterChannelToggle = (channel: keyof ChannelSelectionMap, value: boolean) => {
-    setFilterChannels((prev) => {
-      const next = { ...prev };
-
-      if (current && isGrayscaleImage(current.imageData) && (channel === 'red' || channel === 'green' || channel === 'blue')) {
-        next.red = value;
-        next.green = value;
-        next.blue = value;
-        return next;
-      }
-
-      next[channel] = value;
-      return next;
-    });
-  };
+  ];
 
   return (
-    <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#fafafa' }}>
-      <AppBar position="static" color="default" elevation={1}>
-        <Toolbar sx={{ gap: 1, flexWrap: 'wrap' }}>
-          <Typography variant="h6" sx={{ flexGrow: 1, fontWeight: 600 }}>
-            Графический редактор
-          </Typography>
+    <div className="app">
+      <MenuBar menus={menus} title={image ? `${fileName} @ ${view.percent}%` : 'Графический редактор'} />
 
-          <Button variant="contained" component="label">
-            Открыть
-            <input type="file" hidden accept=".png,.jpg,.jpeg,.gb7,image/png,image/jpeg" onChange={handleFileLoad} ref={inputRef} />
-          </Button>
+      <input
+        ref={inputRef}
+        type="file"
+        hidden
+        accept=".png,.jpg,.jpeg,.gb7,image/png,image/jpeg"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) void openFile(file);
+          e.target.value = '';
+        }}
+      />
 
-          <Button
-            variant={activeTool === 'eyedropper' ? 'contained' : 'outlined'}
-            onClick={() => setActiveTool((prev) => (prev === 'eyedropper' ? 'move' : 'eyedropper'))}
-            disabled={!current}
+      <aside className="toolbox" aria-label="Инструменты">
+        {TOOLS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className={`tool${tool === t.id ? ' tool--active' : ''}`}
+            title={`${t.label} (${t.key})`}
+            aria-label={t.label}
+            aria-pressed={tool === t.id}
+            disabled={noImage}
+            onClick={() => setTool(t.id)}
           >
-            Пипетка
-          </Button>
+            {t.icon}
+          </button>
+        ))}
+      </aside>
 
-          <Button variant="outlined" onClick={openLevelsDialog} disabled={!current}>
-            Уровни
-          </Button>
+      <main className="main">
+        <Workspace
+          rgba={rgba}
+          view={view}
+          interpolation={interpolation}
+          tool={tool}
+          busy={busy}
+          onViewChange={setView}
+          onViewportResize={handleViewportResize}
+          onPick={pick}
+          onFileDrop={(file) => void openFile(file)}
+          onOpenClick={() => inputRef.current?.click()}
+        />
+      </main>
 
-          <Button variant="outlined" onClick={openFilterDialog} disabled={!current}>
-            Фильтры
-          </Button>
+      <aside className="sidebar">
+        {image ? (
+          <ChannelPanel image={displayed ?? image} visibility={visibility} onToggle={toggleChannel} />
+        ) : (
+          <section className="panel">
+            <h3 className="panel__title">Каналы</h3>
+            <p className="muted panel__hint">Нет изображения</p>
+          </section>
+        )}
+        <InfoPanel picked={picked} active={tool === 'eyedropper'} />
+      </aside>
 
-          <Button variant="outlined" onClick={openResizeDialog} disabled={!current}>
-            Изменить размер
-          </Button>
-
-          <Button variant="outlined" onClick={() => handleDownload('png')} disabled={!current}>
-            PNG
-          </Button>
-          <Button variant="outlined" onClick={() => handleDownload('jpg')} disabled={!current}>
-            JPG
-          </Button>
-          <Button variant="outlined" onClick={() => handleDownload('gb7')} disabled={!current}>
-            GB7
-          </Button>
-        </Toolbar>
-      </AppBar>
+      <StatusBar
+        fileName={fileName}
+        info={info}
+        width={image?.width ?? null}
+        height={image?.height ?? null}
+        message={message}
+        percent={view.percent}
+        interpolation={interpolation}
+        onPercentChange={zoomTo}
+        onFit={() => image && setView(fitView(image, viewportRef.current))}
+        onInterpolationChange={setInterpolation}
+      />
 
       <LevelsDialog
-        open={levelsOpen}
-        imageData={current?.imageData ?? null}
-        maxValue={getMaxLevelValue()}
-        activeChannel={levelsChannel}
-        settings={levelsSettings}
-        previewEnabled={levelsPreviewEnabled}
-        histogramMode={histogramMode}
-        onClose={cancelLevels}
-        onApply={applyLevels}
-        onReset={resetLevels}
-        onTogglePreview={setLevelsPreviewEnabled}
-        onChannelChange={setLevelsChannel}
-        onSettingChange={updateLevelsSetting}
-        onHistogramModeChange={setHistogramMode}
+        open={dialog === 'levels'}
+        image={image}
+        onPreview={setPreview}
+        onApply={(result) => applyResult(result, 'Уровни применены')}
+        onClose={closeDialog}
       />
-
       <FilterDialog
-        open={filterOpen}
-        imageData={current?.imageData ?? null}
-        presetId={filterPresetId}
-        kernel={filterKernel}
-        channels={filterChannels}
-        padding={filterPadding}
-        previewEnabled={filterPreviewEnabled}
-        onClose={cancelFilter}
-        onApply={applyFilter}
-        onReset={resetFilter}
-        onPreviewToggle={setFilterPreviewEnabled}
-        onPresetChange={handleFilterPresetChange}
-        onKernelChange={handleFilterKernelChange}
-        onChannelToggle={handleFilterChannelToggle}
-        onPaddingChange={setFilterPadding}
+        open={dialog === 'filter'}
+        image={image}
+        onPreview={setPreview}
+        onApply={(result) => applyResult(result, 'Фильтр применён')}
+        onClose={closeDialog}
+        onBusyChange={setBusy}
       />
-
       <ResizeDialog
-        open={resizeDialogOpen}
-        imageWidth={current?.imageData.width ?? 0}
-        imageHeight={current?.imageData.height ?? 0}
-        onClose={() => setResizeDialogOpen(false)}
+        open={dialog === 'resize'}
+        width={image?.width ?? 1}
+        height={image?.height ?? 1}
         onApply={applyResize}
+        onClose={closeDialog}
       />
-
-      <Container maxWidth="xl" sx={{ flex: 1, py: 2, display: 'flex', justifyContent: 'center', alignItems: 'stretch' }}>
-        <Box sx={{ display: 'flex', width: '100%', height: '100%', minHeight: 420, borderRadius: 2, border: '1px solid #d0d0d0', overflow: 'hidden', background: '#ffffff' }}>
-          {current && <ChannelPanel imageData={current.imageData} selection={channelSelection} onToggle={handleChannelToggle} />}
-
-          <Box
-            className="canvas-shell"
-            sx={{
-              flex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              background: 'linear-gradient(45deg, #e0e0e0 25%, transparent 25%), linear-gradient(-45deg, #e0e0e0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #e0e0e0 75%), linear-gradient(-45deg, transparent 75%, #e0e0e0 75%)',
-              backgroundSize: '24px 24px',
-              backgroundPosition: '0 0, 0 12px, 12px -12px, -12px 0',
-              overflow: 'auto',
-              p: 2,
-              gap: 1
-            }}
-          >
-            <canvas ref={canvasRef} className="main-canvas" onClick={handleCanvasClick} style={{ cursor: activeTool === 'eyedropper' ? 'crosshair' : 'default' }} />
-
-            <Box sx={{ alignSelf: 'stretch', background: '#fff', border: '1px solid #dadada', borderRadius: 1, p: 1.5, display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
-              <Box component="label" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <Typography variant="caption">Масштаб</Typography>
-                <select
-                  value={scalePercent}
-                  onChange={(event) => handleScaleChange(Number(event.target.value))}
-                  disabled={!current}
-                  style={{ minWidth: 110, padding: '6px 8px', borderRadius: 6, border: '1px solid #d0d0d0' }}
-                >
-                  {[12, 25, 50, 75, 100, 125, 150, 200, 300].map((value) => (
-                    <option key={value} value={value}>{value}%</option>
-                  ))}
-                </select>
-              </Box>
-
-              <Box component="label" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <Typography variant="caption">Интерполяция</Typography>
-                <select
-                  value={resizeMode}
-                  onChange={(event) => setResizeMode(event.target.value as InterpolationMode)}
-                  disabled={!current}
-                  style={{ minWidth: 170, padding: '6px 8px', borderRadius: 6, border: '1px solid #d0d0d0' }}
-                >
-                  {INTERPOLATION_MODES.map((mode) => (
-                    <option key={mode} value={mode}>{mode === 'nearest' ? 'Ближайший сосед' : 'Билинейная'}</option>
-                  ))}
-                </select>
-              </Box>
-            </Box>
-
-            {pickerInfo && (
-              <Box sx={{ alignSelf: 'stretch', background: '#fff', border: '1px solid #dadada', borderRadius: 1, p: 1.5 }}>
-                <Typography variant="body2" sx={{ fontWeight: 700, mb: 0.5 }}>Пипетка</Typography>
-                <Stack direction="row" spacing={2} flexWrap="wrap">
-                  <Typography variant="caption">X: {pickerInfo.x}</Typography>
-                  <Typography variant="caption">Y: {pickerInfo.y}</Typography>
-                  <Typography variant="caption">R: {pickerInfo.r}</Typography>
-                  <Typography variant="caption">G: {pickerInfo.g}</Typography>
-                  <Typography variant="caption">B: {pickerInfo.b}</Typography>
-                  <Typography variant="caption">L*: {pickerInfo.l}</Typography>
-                  <Typography variant="caption">a*: {pickerInfo.a}</Typography>
-                  <Typography variant="caption">b*: {pickerInfo.bChannel}</Typography>
-                </Stack>
-              </Box>
-            )}
-          </Box>
-        </Box>
-      </Container>
-
-      <Box component="footer" sx={{ px: 2, py: 1, borderTop: '1px solid #d8d8d8', background: '#f3f3f3', fontSize: 14 }}>
-        <Stack direction="row" spacing={2} alignItems="center" justifyContent="space-between">
-          <Typography variant="body2">{statusText}</Typography>
-          <Typography variant="body2">
-            {current ? `${current.imageData.width}×${current.imageData.height}` : '0×0'} • глубина {current?.depth ?? 0}
-          </Typography>
-        </Stack>
-      </Box>
-    </Box>
+    </div>
   );
 }

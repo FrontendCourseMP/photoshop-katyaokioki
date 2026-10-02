@@ -1,208 +1,127 @@
-export type PaddingMode = 'black' | 'white' | 'replicate';
-export type ChannelSelectionMap = {
-  red: boolean;
-  green: boolean;
-  blue: boolean;
-  alpha: boolean;
-};
+/**
+ * Фильтрация изображения свёрткой с ядром 3×3.
+ * Модуль не зависит от DOM, поэтому используется и в Web Worker.
+ */
+export type EdgeMode = 'black' | 'white' | 'replicate';
+export type Kernel = number[]; // 9 значений построчно
 
-export type KernelPreset = {
+export interface KernelPreset {
   id: string;
   name: string;
-  kernel: number[][];
-};
+  kernel: Kernel;
+}
 
 export const KERNEL_PRESETS: KernelPreset[] = [
-  {
-    id: 'identity',
-    name: 'Тождественное отображение',
-    kernel: [
-      [0, 0, 0],
-      [0, 1, 0],
-      [0, 0, 0]
-    ]
-  },
-  {
-    id: 'sharpen',
-    name: 'Повышение резкости',
-    kernel: [
-      [0, -1, 0],
-      [-1, 5, -1],
-      [0, -1, 0]
-    ]
-  },
-  {
-    id: 'gaussian',
-    name: 'Гаусс 3×3',
-    kernel: [
-      [1, 2, 1],
-      [2, 4, 2],
-      [1, 2, 1]
-    ]
-  },
-  {
-    id: 'box',
-    name: 'Прямоугольное размытие',
-    kernel: [
-      [1, 1, 1],
-      [1, 1, 1],
-      [1, 1, 1]
-    ]
-  },
-  {
-    id: 'prewitt-x',
-    name: 'Prewitt X',
-    kernel: [
-      [-1, 0, 1],
-      [-1, 0, 1],
-      [-1, 0, 1]
-    ]
-  },
-  {
-    id: 'prewitt-y',
-    name: 'Prewitt Y',
-    kernel: [
-      [-1, -1, -1],
-      [0, 0, 0],
-      [1, 1, 1]
-    ]
-  }
+  { id: 'identity', name: 'Тождественное отображение', kernel: [0, 0, 0, 0, 1, 0, 0, 0, 0] },
+  { id: 'sharpen', name: 'Повышение резкости', kernel: [0, -1, 0, -1, 5, -1, 0, -1, 0] },
+  { id: 'gaussian', name: 'Фильтр Гаусса 3×3', kernel: [1, 2, 1, 2, 4, 2, 1, 2, 1] },
+  { id: 'box', name: 'Прямоугольное размытие', kernel: [1, 1, 1, 1, 1, 1, 1, 1, 1] },
+  { id: 'prewitt-x', name: 'Оператор Прюитта (горизонтальный)', kernel: [-1, 0, 1, -1, 0, 1, -1, 0, 1] },
+  { id: 'prewitt-y', name: 'Оператор Прюитта (вертикальный)', kernel: [-1, -1, -1, 0, 0, 0, 1, 1, 1] }
 ];
 
-export const DEFAULT_CHANNEL_SELECTION: ChannelSelectionMap = {
-  red: true,
-  green: true,
-  blue: true,
-  alpha: true
+export const EDGE_MODE_LABELS: Record<EdgeMode, string> = {
+  black: 'Заполнение чёрным',
+  white: 'Заполнение белым',
+  replicate: 'Копирование края'
 };
 
-export function normalizeKernel(kernel: number[][]): number[][] {
-  const normalized = Array.from({ length: 3 }, () => Array(3).fill(0));
+export function getPreset(id: string): KernelPreset {
+  return KERNEL_PRESETS.find((p) => p.id === id) ?? KERNEL_PRESETS[0];
+}
 
-  for (let row = 0; row < 3; row += 1) {
-    for (let col = 0; col < 3; col += 1) {
-      const value = Number(kernel[row]?.[col] ?? 0);
-      normalized[row][col] = Number.isFinite(value) ? value : 0;
+/**
+ * Делитель для нормировки: сумма коэффициентов (чтобы размытие не меняло яркость),
+ * а если сумма равна 0 (операторы выделения границ) — 1.
+ */
+export function kernelDivisor(kernel: Kernel): number {
+  const sum = kernel.reduce((acc, v) => acc + v, 0);
+  return Math.abs(sum) < 1e-9 ? 1 : sum;
+}
+
+export interface ConvolutionJob {
+  width: number;
+  height: number;
+  channels: number;
+  data: Uint8ClampedArray;
+  /** максимальное значение для каждого канала (127/255) — для «белого» края и ограничения */
+  maxValues: number[];
+  /** к каким каналам применять */
+  selected: boolean[];
+  kernel: Kernel;
+  divisor: number;
+  edge: EdgeMode;
+}
+
+/**
+ * Расширение одного канала на 1 пиксель с каждой стороны по выбранной стратегии.
+ * Возвращает буфер размером (w + 2) × (h + 2).
+ */
+export function padChannel(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  channels: number,
+  channel: number,
+  edge: EdgeMode,
+  max: number
+): Uint16Array {
+  const pw = width + 2;
+  const ph = height + 2;
+  const padded = new Uint16Array(pw * ph);
+  const fill = edge === 'white' ? max : 0;
+
+  if (edge !== 'replicate') padded.fill(fill);
+
+  for (let y = 0; y < ph; y += 1) {
+    const isInnerRow = y >= 1 && y <= height;
+    if (edge !== 'replicate' && !isInnerRow) continue;
+    const sy = Math.min(Math.max(y - 1, 0), height - 1);
+
+    for (let x = 0; x < pw; x += 1) {
+      const isInnerCol = x >= 1 && x <= width;
+      if (edge !== 'replicate' && !isInnerCol) continue;
+      const sx = Math.min(Math.max(x - 1, 0), width - 1);
+      padded[y * pw + x] = data[(sy * width + sx) * channels + channel];
     }
   }
 
-  return normalized;
+  return padded;
 }
 
-export function getPresetKernel(id: string): number[][] {
-  const preset = KERNEL_PRESETS.find((item) => item.id === id);
-  return preset ? normalizeKernel(preset.kernel) : normalizeKernel(KERNEL_PRESETS[0].kernel);
-}
+/**
+ * Свёртка. onRow вызывается после каждой строки (для прогресса и
+ * кооперативной многозадачности).
+ */
+export function convolve(job: ConvolutionJob, onRow?: (done: number, total: number) => void): Uint8ClampedArray<ArrayBuffer> {
+  const { width, height, channels, data, kernel, divisor, edge, selected, maxValues } = job;
+  const out = new Uint8ClampedArray(data); // невыбранные каналы остаются как были
+  const pw = width + 2;
+  const k = kernel;
+  const active = selected.map((v, i) => (v ? i : -1)).filter((i) => i >= 0);
+  const total = active.length * height;
+  let done = 0;
 
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
-}
+  for (const c of active) {
+    const p = padChannel(data, width, height, channels, c, edge, maxValues[c]);
+    const max = maxValues[c];
 
-function getPaddingValue(paddingMode: PaddingMode, x: number, y: number, imageWidth: number, imageHeight: number, source: Uint8ClampedArray, channel: number): number {
-  if (x >= 0 && x < imageWidth && y >= 0 && y < imageHeight) {
-    return source[(y * imageWidth + x) * 4 + channel];
-  }
-
-  if (paddingMode === 'black') {
-    return 0;
-  }
-
-  if (paddingMode === 'white') {
-    return 255;
-  }
-
-  const clampedX = clamp(x, 0, imageWidth - 1);
-  const clampedY = clamp(y, 0, imageHeight - 1);
-  return source[(clampedY * imageWidth + clampedX) * 4 + channel];
-}
-
-export function applyKernelToImageData(
-  imageData: ImageData,
-  kernel: number[][],
-  selectedChannels: ChannelSelectionMap,
-  paddingMode: PaddingMode = 'black'
-): ImageData {
-  const normalizedKernel = normalizeKernel(kernel);
-  const { data, width, height } = imageData;
-  const output = new Uint8ClampedArray(data.length);
-
-  const kernelWeight = normalizedKernel.flat().reduce((sum, value) => sum + Math.abs(value), 0) || 1;
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = (y * width + x) * 4;
-
-      for (let channel = 0; channel < 4; channel += 1) {
-        if (!selectedChannels.red && channel === 0) continue;
-        if (!selectedChannels.green && channel === 1) continue;
-        if (!selectedChannels.blue && channel === 2) continue;
-        if (!selectedChannels.alpha && channel === 3) continue;
-
-        let acc = 0;
-
-        for (let ky = 0; ky < 3; ky += 1) {
-          for (let kx = 0; kx < 3; kx += 1) {
-            const sampleX = x + kx - 1;
-            const sampleY = y + ky - 1;
-            const sampleValue = getPaddingValue(paddingMode, sampleX, sampleY, width, height, data, channel);
-            acc += sampleValue * normalizedKernel[ky][kx];
-          }
-        }
-
-        const normalized = kernelWeight === 0 ? acc : acc / kernelWeight;
-        output[index + channel] = clamp(Math.round(normalized), 0, 255);
+    for (let y = 0; y < height; y += 1) {
+      const r0 = y * pw;
+      const r1 = r0 + pw;
+      const r2 = r1 + pw;
+      for (let x = 0; x < width; x += 1) {
+        const acc =
+          p[r0 + x] * k[0] + p[r0 + x + 1] * k[1] + p[r0 + x + 2] * k[2] +
+          p[r1 + x] * k[3] + p[r1 + x + 1] * k[4] + p[r1 + x + 2] * k[5] +
+          p[r2 + x] * k[6] + p[r2 + x + 1] * k[7] + p[r2 + x + 2] * k[8];
+        const v = Math.round(acc / divisor);
+        out[(y * width + x) * channels + c] = v < 0 ? 0 : v > max ? max : v;
       }
+      done += 1;
+      onRow?.(done, total);
     }
   }
 
-  return new ImageData(output, width, height);
-}
-
-export async function applyKernelAsync(
-  imageData: ImageData,
-  kernel: number[][],
-  selectedChannels: ChannelSelectionMap,
-  paddingMode: PaddingMode = 'black',
-  chunkSize = 2048
-): Promise<ImageData> {
-  const output = new Uint8ClampedArray(imageData.data.length);
-  const { data, width, height } = imageData;
-  const normalizedKernel = normalizeKernel(kernel);
-  const kernelWeight = normalizedKernel.flat().reduce((sum, value) => sum + Math.abs(value), 0) || 1;
-
-  let processed = 0;
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = (y * width + x) * 4;
-
-      for (let channel = 0; channel < 4; channel += 1) {
-        if (!selectedChannels.red && channel === 0) continue;
-        if (!selectedChannels.green && channel === 1) continue;
-        if (!selectedChannels.blue && channel === 2) continue;
-        if (!selectedChannels.alpha && channel === 3) continue;
-
-        let acc = 0;
-
-        for (let ky = 0; ky < 3; ky += 1) {
-          for (let kx = 0; kx < 3; kx += 1) {
-            const sampleX = x + kx - 1;
-            const sampleY = y + ky - 1;
-            const sampleValue = getPaddingValue(paddingMode, sampleX, sampleY, width, height, data, channel);
-            acc += sampleValue * normalizedKernel[ky][kx];
-          }
-        }
-
-        const normalized = kernelWeight === 0 ? acc : acc / kernelWeight;
-        output[index + channel] = clamp(Math.round(normalized), 0, 255);
-      }
-
-      processed += 1;
-      if (processed % chunkSize === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-    }
-  }
-
-  return new ImageData(output, width, height);
+  return out;
 }

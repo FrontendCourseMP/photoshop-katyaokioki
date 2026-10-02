@@ -1,85 +1,71 @@
-import Box from '@mui/material/Box';
-import Button from '@mui/material/Button';
-import Stack from '@mui/material/Stack';
-import Typography from '@mui/material/Typography';
-import { createChannelPreview, getChannelDescriptor, type ChannelKey, type ChannelSelection } from '../core/channel';
+import { useMemo } from 'react';
+import { resizeRaster } from '../core/interpolation';
+import { CHANNEL_LABELS, createChannelThumbnail, getChannelKeys, type ChannelKey, type ChannelVisibility, type RasterImage } from '../core/raster';
 
-function toDataUrl(imageData: ImageData): string {
+const THUMB = 48;
+
+function toDataUrl(image: ImageData): string {
   const canvas = document.createElement('canvas');
-  canvas.width = imageData.width;
-  canvas.height = imageData.height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    return '';
-  }
-  ctx.putImageData(imageData, 0, 0);
-  return canvas.toDataURL('image/png');
+  canvas.width = image.width;
+  canvas.height = image.height;
+  canvas.getContext('2d')!.putImageData(image, 0, 0);
+  return canvas.toDataURL();
 }
 
 type Props = {
-  imageData: ImageData;
-  selection: ChannelSelection;
+  image: RasterImage;
+  visibility: ChannelVisibility;
   onToggle: (key: ChannelKey) => void;
 };
 
-export function ChannelPanel({ imageData, selection, onToggle }: Props) {
-  const descriptor = getChannelDescriptor(imageData);
+/**
+ * Панель каналов: миниатюра каждого канала в градациях серого
+ * (белый — максимум, чёрный — отсутствие), клик включает/выключает канал.
+ */
+export function ChannelPanel({ image, visibility, onToggle }: Props) {
+  const keys = getChannelKeys(image);
+
+  const thumbs = useMemo(() => {
+    // уменьшаем один раз с сохранением пропорций
+    const k = Math.min(1, THUMB / Math.max(image.width, image.height));
+    const small = resizeRaster(image, Math.max(1, Math.round(image.width * k)), Math.max(1, Math.round(image.height * k)), 'bilinear');
+    return Object.fromEntries(getChannelKeys(image).map((key) => [key, toDataUrl(createChannelThumbnail(small, key))]));
+  }, [image]);
 
   return (
-    <Box
-      sx={{
-        width: 240,
-        minWidth: 220,
-        borderRight: '1px solid #d9d9d9',
-        background: '#f8f8f8',
-        p: 2,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 1.5
-      }}
-    >
-      <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
-        Каналы
-      </Typography>
-
-      <Stack spacing={1}>
-        {descriptor.keys.map((key) => {
-          const enabled = selection[key] !== false;
-          const preview = createChannelPreview(imageData, key);
-          const label = descriptor.labels[key];
-
+    <section className="panel">
+      <h3 className="panel__title">
+        Каналы <span className="muted">· {keys.length}</span>
+      </h3>
+      <ul className="channels">
+        {keys.map((key) => {
+          const enabled = visibility[key] !== false;
           return (
-            <Button
-              key={key}
-              variant={enabled ? 'contained' : 'outlined'}
-              color={enabled ? 'primary' : 'inherit'}
-              onClick={() => onToggle(key)}
-              sx={{
-                justifyContent: 'flex-start',
-                textTransform: 'none',
-                px: 1,
-                py: 0.75,
-                minHeight: 52,
-                gap: 1.25
-              }}
-            >
-              <img
-                src={toDataUrl(preview)}
-                alt={label}
-                style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6, border: '1px solid rgba(0,0,0,0.1)' }}
-              />
-              <Box sx={{ minWidth: 0, flex: 1, textAlign: 'left' }}>
-                <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                  {label}
-                </Typography>
-                <Typography variant="caption" sx={{ color: enabled ? '#eaeaea' : '#666' }}>
-                  {enabled ? 'включён' : 'выключен'}
-                </Typography>
-              </Box>
-            </Button>
+            <li key={key}>
+              <button
+                type="button"
+                className={`channel${enabled ? ' channel--on' : ''}`}
+                aria-pressed={enabled}
+                onClick={() => onToggle(key)}
+                title={enabled ? 'Скрыть канал' : 'Показать канал'}
+              >
+                <span className="channel__eye" aria-hidden>
+                  {enabled && (
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" />
+                      <circle cx="12" cy="12" r="3" />
+                    </svg>
+                  )}
+                </span>
+                <span className="channel__thumb">
+                  <img src={thumbs[key]} alt="" />
+                </span>
+                <span className={`channel__name channel__name--${key}`}>{CHANNEL_LABELS[key]}</span>
+              </button>
+            </li>
           );
         })}
-      </Stack>
-    </Box>
+      </ul>
+    </section>
   );
 }

@@ -1,141 +1,144 @@
-export const LEVEL_CHANNELS = ['master', 'red', 'green', 'blue', 'alpha'] as const;
-export type LevelsChannel = (typeof LEVEL_CHANNELS)[number];
+import { cloneRaster, colorMax, hasAlpha, isGray, luma, type RasterImage } from './raster';
 
-export type LevelPreset = {
+/**
+ * Каналы инструмента «Уровни».
+ * master — все цветовые каналы сразу (для серого изображения это сам серый канал).
+ */
+export type LevelsChannel = 'master' | 'red' | 'green' | 'blue' | 'alpha';
+
+export interface LevelParams {
   black: number;
   white: number;
   gamma: number;
+}
+
+export type LevelsSettings = Record<LevelsChannel, LevelParams>;
+
+export const GAMMA_MIN = 0.1;
+export const GAMMA_MAX = 9.9;
+
+export const LEVELS_CHANNEL_LABELS: Record<LevelsChannel, string> = {
+  master: 'Master',
+  red: 'Красный',
+  green: 'Зелёный',
+  blue: 'Синий',
+  alpha: 'Альфа'
 };
 
-export type LevelsSettings = Record<LevelsChannel, LevelPreset>;
+/** Какие каналы доступны для данного изображения. */
+export function getLevelsChannels(image: RasterImage): LevelsChannel[] {
+  const list: LevelsChannel[] = isGray(image) ? ['master'] : ['master', 'red', 'green', 'blue'];
+  if (hasAlpha(image)) list.push('alpha');
+  return list;
+}
 
-export function createDefaultLevels(maxValue = 255): LevelsSettings {
+/** Максимальное значение на оси гистограммы: 127 для GB7, 255 для 8 бит, альфа всегда 255. */
+export function getLevelsMax(image: RasterImage, channel: LevelsChannel): number {
+  return channel === 'alpha' ? 255 : colorMax(image);
+}
+
+export function defaultParams(max: number): LevelParams {
+  return { black: 0, white: max, gamma: 1 };
+}
+
+export function createDefaultLevels(image: RasterImage): LevelsSettings {
+  const cMax = colorMax(image);
   return {
-    master: { black: 0, white: maxValue, gamma: 1 },
-    red: { black: 0, white: maxValue, gamma: 1 },
-    green: { black: 0, white: maxValue, gamma: 1 },
-    blue: { black: 0, white: maxValue, gamma: 1 },
-    alpha: { black: 0, white: maxValue, gamma: 1 }
+    master: defaultParams(cMax),
+    red: defaultParams(cMax),
+    green: defaultParams(cMax),
+    blue: defaultParams(cMax),
+    alpha: defaultParams(255)
   };
 }
 
-export function normalizeLevelConfig(value: LevelPreset, maxValue: number): LevelPreset {
-  const black = Math.max(0, Math.min(maxValue, Number(value.black) || 0));
-  const white = Math.max(black + 1, Math.min(maxValue, Number(value.white) || maxValue));
-  const gamma = Math.max(0.1, Math.min(9.9, Number(value.gamma) || 1));
-
-  return { black, white, gamma };
+export function isIdentity(p: LevelParams, max: number): boolean {
+  return p.black === 0 && p.white === max && p.gamma === 1;
 }
 
-export function getChannelValue(channel: LevelsChannel, r: number, g: number, b: number, a: number): number {
-  switch (channel) {
-    case 'red':
-      return r;
-    case 'green':
-      return g;
-    case 'blue':
-      return b;
-    case 'alpha':
-      return a;
-    case 'master':
-    default:
-      return Math.round((r + g + b) / 3);
-  }
+/** Ограничения: чёрная точка < белой, гамма в 0.1..9.9 */
+export function normalizeParams(p: LevelParams, max: number): LevelParams {
+  const black = Math.round(Math.min(Math.max(p.black, 0), max - 1));
+  const white = Math.round(Math.min(Math.max(p.white, black + 1), max));
+  const gamma = Math.min(Math.max(Number.isFinite(p.gamma) ? p.gamma : 1, GAMMA_MIN), GAMMA_MAX);
+  return { black, white, gamma: Math.round(gamma * 100) / 100 };
 }
 
-export function createLevelLut(config: LevelPreset, maxValue: number): Uint16Array {
-  const black = Math.max(0, Math.min(maxValue, Math.round(config.black || 0)));
-  const white = Math.max(black + 1, Math.min(maxValue, Math.round(config.white || maxValue)));
-  const gamma = Math.max(0.1, Math.min(9.9, Number(config.gamma) || 1));
-  const lut = new Uint16Array(maxValue + 1);
+/**
+ * Положение маркера полутонов (0..1 между чёрной и белой точкой) ↔ гамма.
+ * Значение m отображается в середину шкалы: m^(1/γ) = 0.5 ⇒ γ = log(m)/log(0.5).
+ * Сдвиг маркера влево (m < 0.5) даёт γ > 1 — осветление, вправо — затемнение.
+ */
+export function gammaToMidpoint(gamma: number): number {
+  return 0.5 ** gamma;
+}
 
-  for (let value = 0; value <= maxValue; value += 1) {
-    if (value <= black) {
-      lut[value] = 0;
-      continue;
-    }
+export function midpointToGamma(t: number): number {
+  const clamped = Math.min(Math.max(t, 0.0001), 0.9999);
+  return Math.min(Math.max(Math.log(clamped) / Math.log(0.5), GAMMA_MIN), GAMMA_MAX);
+}
 
-    if (value >= white) {
-      lut[value] = maxValue;
-      continue;
-    }
+/** Таблица подстановки (LUT) для одного канала. */
+export function buildLut(params: LevelParams, max: number): Uint8Array {
+  const { black, white, gamma } = normalizeParams(params, max);
+  const lut = new Uint8Array(max + 1);
+  const range = white - black;
+  const inv = 1 / gamma;
 
-    const normalized = (value - black) / (white - black || 1);
-    const adjusted = Math.pow(Math.max(0, Math.min(1, normalized)), 1 / gamma);
-    lut[value] = Math.round(adjusted * maxValue);
+  for (let v = 0; v <= max; v += 1) {
+    if (v <= black) lut[v] = 0;
+    else if (v >= white) lut[v] = max;
+    else lut[v] = Math.round(((v - black) / range) ** inv * max);
   }
 
   return lut;
 }
 
-export function transformLevelValue(value: number, config: LevelPreset, maxValue: number): number {
-  const lut = createLevelLut(config, maxValue);
-  const clamped = Math.max(0, Math.min(maxValue, Math.round(value)));
-  return lut[clamped];
+/**
+ * Применение уровней. Сначала таблица отдельного канала, затем общая (master).
+ * Master не затрагивает альфа-канал. Исходный растр не изменяется.
+ */
+export function applyLevels(image: RasterImage, settings: LevelsSettings): RasterImage {
+  const cMax = colorMax(image);
+  const master = buildLut(settings.master, cMax);
+  const result = cloneRaster(image);
+  const { data, channels } = result;
+  const alphaLut = hasAlpha(image) ? buildLut(settings.alpha, 255) : null;
+
+  // объединяем таблицы канала и master в одну, чтобы было одно обращение на пиксель
+  const combine = (lut: Uint8Array) => lut.map((v) => master[v]);
+  const colorLuts = isGray(image)
+    ? [master]
+    : [combine(buildLut(settings.red, cMax)), combine(buildLut(settings.green, cMax)), combine(buildLut(settings.blue, cMax))];
+
+  const colorCount = colorLuts.length;
+  for (let i = 0; i < data.length; i += channels) {
+    for (let c = 0; c < colorCount; c += 1) data[i + c] = colorLuts[c][data[i + c]];
+    if (alphaLut) data[i + channels - 1] = alphaLut[data[i + channels - 1]];
+  }
+
+  return result;
 }
 
-export function applyLevelsToImageData(
-  imageData: ImageData,
-  settings: LevelsSettings,
-  activeChannel: LevelsChannel,
-  maxValue = 255
-): ImageData {
-  const output = new Uint8ClampedArray(imageData.data.length);
-  const { data, width, height } = imageData;
+/** Гистограмма: для master — светлота пикселя (Rec. 601), иначе значение канала. */
+export function computeHistogram(image: RasterImage, channel: LevelsChannel): Uint32Array {
+  const max = getLevelsMax(image, channel);
+  const hist = new Uint32Array(max + 1);
+  const { data, channels } = image;
+  const gray = isGray(image);
 
-  const masterLut = createLevelLut(normalizeLevelConfig(settings.master, maxValue), maxValue);
-  const redLut = createLevelLut(normalizeLevelConfig(settings.red, maxValue), maxValue);
-  const greenLut = createLevelLut(normalizeLevelConfig(settings.green, maxValue), maxValue);
-  const blueLut = createLevelLut(normalizeLevelConfig(settings.blue, maxValue), maxValue);
-  const alphaLut = createLevelLut(normalizeLevelConfig(settings.alpha, maxValue), maxValue);
+  let offset = 0;
+  if (channel === 'alpha') offset = channels - 1;
+  else if (channel === 'green') offset = 1;
+  else if (channel === 'blue') offset = 2;
 
-  for (let i = 0; i < data.length; i += 4) {
-    let r = masterLut[data[i]];
-    let g = masterLut[data[i + 1]];
-    let b = masterLut[data[i + 2]];
-    let a = masterLut[data[i + 3] ?? 255];
-
-    if (activeChannel === 'red') {
-      r = redLut[r];
-    } else if (activeChannel === 'green') {
-      g = greenLut[g];
-    } else if (activeChannel === 'blue') {
-      b = blueLut[b];
-    } else if (activeChannel === 'alpha') {
-      a = alphaLut[a];
-    } else {
-      r = masterLut[r];
-      g = masterLut[g];
-      b = masterLut[b];
-      a = masterLut[a];
+  if (channel === 'master' && !gray) {
+    for (let i = 0; i < data.length; i += channels) {
+      hist[Math.round(luma(data[i], data[i + 1], data[i + 2]))] += 1;
     }
-
-    output[i] = r;
-    output[i + 1] = g;
-    output[i + 2] = b;
-    output[i + 3] = a;
+  } else {
+    for (let i = offset; i < data.length; i += channels) hist[data[i]] += 1;
   }
 
-  return new ImageData(output, width, height);
-}
-
-export function getHistogramData(imageData: ImageData, channel: LevelsChannel, maxValue = 255): number[] {
-  const histogram = new Array(maxValue + 1).fill(0);
-  const { data } = imageData;
-
-  for (let index = 0; index < data.length; index += 4) {
-    const r = data[index];
-    const g = data[index + 1];
-    const b = data[index + 2];
-    const a = data[index + 3] ?? 255;
-    const sample = getChannelValue(channel, r, g, b, a);
-    const value = Math.max(0, Math.min(maxValue, sample));
-    histogram[value] += 1;
-  }
-
-  return histogram;
-}
-
-export function getLogHistogramData(histogram: number[]): number[] {
-  return histogram.map((value) => (value <= 0 ? 0 : Math.log10(value + 1)));
+  return hist;
 }

@@ -1,178 +1,173 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import Box from '@mui/material/Box';
-import Button from '@mui/material/Button';
-import Checkbox from '@mui/material/Checkbox';
-import FormControlLabel from '@mui/material/FormControlLabel';
-import Stack from '@mui/material/Stack';
-import TextField from '@mui/material/TextField';
-import Typography from '@mui/material/Typography';
-import { INTERPOLATION_MODES, type InterpolationMode } from '../core/interpolation';
+import { useEffect, useState } from 'react';
+import { DEFAULT_INTERPOLATION, INTERPOLATORS, getInterpolator } from '../core/interpolation';
+import { Modal } from './Modal';
 
-type ResizeDialogProps = {
+type Unit = 'percent' | 'px';
+
+type Props = {
   open: boolean;
-  imageWidth: number;
-  imageHeight: number;
+  width: number;
+  height: number;
+  onApply: (width: number, height: number, mode: string) => void;
   onClose: () => void;
-  onApply: (nextWidth: number, nextHeight: number, interpolation: InterpolationMode) => void;
 };
 
-type ResizeUnit = 'percent' | 'pixels';
+export const MAX_SIDE = 10000;
+const MAX_PERCENT = 1000;
 
-const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+const megapixels = (w: number, h: number) => `${((w * h) / 1e6).toFixed(2)} Мп`;
 
-export function ResizeDialog({ open, imageWidth, imageHeight, onClose, onApply }: ResizeDialogProps) {
-  const dialogRef = useRef<HTMLDialogElement | null>(null);
-  const aspectRatio = imageWidth > 0 && imageHeight > 0 ? imageWidth / imageHeight : 1;
-  const [unit, setUnit] = useState<ResizeUnit>('percent');
-  const [width, setWidth] = useState(imageWidth);
-  const [height, setHeight] = useState(imageHeight);
-  const [keepAspect, setKeepAspect] = useState(true);
-  const [interpolation, setInterpolation] = useState<InterpolationMode>('bilinear');
+/** Проверка значения поля. Возвращает размер в пикселях или текст ошибки. */
+function validate(raw: string, unit: Unit, base: number): { px: number } | { error: string } {
+  if (raw.trim() === '') return { error: 'Введите значение' };
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return { error: 'Должно быть числом' };
+  if (unit === 'px') {
+    if (!Number.isInteger(value)) return { error: 'Целое число пикселей' };
+    if (value < 1 || value > MAX_SIDE) return { error: `От 1 до ${MAX_SIDE} px` };
+    return { px: value };
+  }
+  if (value <= 0 || value > MAX_PERCENT) return { error: `От 0 до ${MAX_PERCENT}%` };
+  const px = Math.round((base * value) / 100);
+  if (px < 1) return { error: 'Меньше 1 пикселя' };
+  if (px > MAX_SIDE) return { error: `Больше ${MAX_SIDE} px` };
+  return { px };
+}
+
+const fmt = (v: number) => String(Math.round(v * 100) / 100);
+
+export function ResizeDialog({ open, width, height, onApply, onClose }: Props) {
+  const [unit, setUnit] = useState<Unit>('percent');
+  const [w, setW] = useState('100');
+  const [h, setH] = useState('100');
+  const [linked, setLinked] = useState(true);
+  const [mode, setMode] = useState<string>(DEFAULT_INTERPOLATION);
 
   useEffect(() => {
-    if (!dialogRef.current) {
-      return;
-    }
-
     if (open) {
-      dialogRef.current.showModal();
-    } else {
-      dialogRef.current.close();
+      setUnit('percent');
+      setW('100');
+      setH('100');
+      setLinked(true);
     }
   }, [open]);
 
-  useEffect(() => {
-    setWidth(imageWidth);
-    setHeight(imageHeight);
-  }, [imageWidth, imageHeight, open]);
+  const vw = validate(w, unit, width);
+  const vh = validate(h, unit, height);
+  const newW = 'px' in vw ? vw.px : null;
+  const newH = 'px' in vh ? vh.px : null;
+  const ok = newW !== null && newH !== null;
 
-  const percentValue = useMemo(() => {
-    const base = Math.max(imageWidth, imageHeight, 1);
-    return Math.round((base / base) * 100);
-  }, [imageWidth, imageHeight]);
-
-  const applySize = () => {
-    const nextWidth = clamp(Math.round(width), 1, 10000);
-    const nextHeight = clamp(Math.round(height), 1, 10000);
-    onApply(nextWidth, nextHeight, interpolation);
-  };
-
-  const handleDimensionChange = (nextValue: number, target: 'width' | 'height') => {
-    const safeValue = clamp(Number.isFinite(nextValue) ? nextValue : 0, 1, 10000);
-
-    if (target === 'width') {
-      setWidth(safeValue);
-      if (keepAspect) {
-        setHeight(Math.max(1, Math.round(safeValue / aspectRatio)));
-      }
-      return;
+  const changeUnit = (next: Unit) => {
+    // переводим текущие значения в новые единицы
+    const pw = newW ?? width;
+    const ph = newH ?? height;
+    if (next === 'px') {
+      setW(String(pw));
+      setH(String(ph));
+    } else {
+      setW(fmt((pw / width) * 100));
+      setH(fmt((ph / height) * 100));
     }
-
-    setHeight(safeValue);
-    if (keepAspect) {
-      setWidth(Math.max(1, Math.round(safeValue * aspectRatio)));
-    }
+    setUnit(next);
   };
 
-  const handlePercentChange = (value: number) => {
-    const safePercent = clamp(value, 12, 300);
-    const nextWidth = Math.max(1, Math.round(imageWidth * (safePercent / 100)));
-    const nextHeight = Math.max(1, Math.round(imageHeight * (safePercent / 100)));
-    setWidth(nextWidth);
-    setHeight(nextHeight);
-    setUnit('percent');
+  const changeW = (raw: string) => {
+    setW(raw);
+    if (!linked) return;
+    const v = Number(raw);
+    if (raw.trim() === '' || !Number.isFinite(v)) return;
+    setH(unit === 'percent' ? raw : String(Math.max(1, Math.round((v * height) / width))));
   };
 
-  if (!open) {
-    return null;
-  }
+  const changeH = (raw: string) => {
+    setH(raw);
+    if (!linked) return;
+    const v = Number(raw);
+    if (raw.trim() === '' || !Number.isFinite(v)) return;
+    setW(unit === 'percent' ? raw : String(Math.max(1, Math.round((v * width) / height))));
+  };
+
+  const interpolator = getInterpolator(mode);
 
   return (
-    <dialog ref={dialogRef} style={{ width: 'min(560px, 90vw)', border: '1px solid #cbcbcb', borderRadius: 12, padding: 0 }}>
-      <Box sx={{ p: 3, background: '#fff' }}>
-        <Typography variant="h6" sx={{ mb: 2 }}>Изменить размер</Typography>
+    <Modal
+      open={open}
+      title="Размер изображения"
+      width={460}
+      onClose={onClose}
+      footer={
+        <>
+          <span className="spacer" />
+          <button type="button" className="btn" onClick={onClose}>
+            Отмена
+          </button>
+          <button type="button" className="btn btn--primary" disabled={!ok} onClick={() => ok && onApply(newW, newH, mode)}>
+            Применить
+          </button>
+        </>
+      }
+    >
+      <div className="resize__mp">
+        <div>
+          <span className="muted">Было</span>
+          <b>{megapixels(width, height)}</b>
+          <span className="muted">
+            {width} × {height} px
+          </span>
+        </div>
+        <div aria-hidden className="resize__arrow">
+          →
+        </div>
+        <div>
+          <span className="muted">Станет</span>
+          <b>{ok ? megapixels(newW, newH) : '—'}</b>
+          <span className="muted">{ok ? `${newW} × ${newH} px` : 'проверьте поля'}</span>
+        </div>
+      </div>
 
-        <Stack spacing={2}>
-          <Stack direction="row" spacing={2} alignItems="center">
-            <Box component="label" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <Typography variant="caption">Единица</Typography>
-              <select
-                value={unit}
-                onChange={(event) => setUnit(event.target.value as ResizeUnit)}
-                style={{ minWidth: 120, padding: '6px 8px', borderRadius: 6, border: '1px solid #d0d0d0' }}
-              >
-                <option value="percent">Проценты</option>
-                <option value="pixels">Пиксели</option>
-              </select>
-            </Box>
+      <label className="field">
+        <span>Единицы</span>
+        <select value={unit} onChange={(e) => changeUnit(e.target.value as Unit)}>
+          <option value="percent">Проценты</option>
+          <option value="px">Пиксели</option>
+        </select>
+      </label>
 
-            <FormControlLabel
-              control={<Checkbox checked={keepAspect} onChange={(event) => setKeepAspect(event.target.checked)} />}
-              label="Сохранять пропорции"
-            />
-          </Stack>
+      <div className="resize__dims">
+        <label className="field">
+          <span>Ширина, {unit === 'px' ? 'px' : '%'}</span>
+          <input type="number" value={w} min={1} step={unit === 'px' ? 1 : 0.01} onChange={(e) => changeW(e.target.value)} aria-invalid={'error' in vw} />
+          {'error' in vw && <small className="error">{vw.error}</small>}
+        </label>
+        <label className="field">
+          <span>Высота, {unit === 'px' ? 'px' : '%'}</span>
+          <input type="number" value={h} min={1} step={unit === 'px' ? 1 : 0.01} onChange={(e) => changeH(e.target.value)} aria-invalid={'error' in vh} />
+          {'error' in vh && <small className="error">{vh.error}</small>}
+        </label>
+      </div>
+      <label className="check">
+        <input type="checkbox" checked={linked} onChange={(e) => setLinked(e.target.checked)} />
+        Сохранять пропорции
+      </label>
 
-          {unit === 'percent' ? (
-            <Box>
-              <Typography variant="caption">Масштаб</Typography>
-              <input
-                type="range"
-                min={12}
-                max={300}
-                step={1}
-                value={Math.max(12, Math.min(300, Math.round((Math.max(width, height) / Math.max(imageWidth, imageHeight)) * 100 || 100)))}
-                onChange={(event) => handlePercentChange(Number(event.target.value))}
-                style={{ width: '100%' }}
-              />
-              <Typography variant="caption">{Math.max(12, Math.min(300, Math.round((Math.max(width, height) / Math.max(imageWidth, imageHeight)) * 100 || 100)))}%</Typography>
-            </Box>
-          ) : null}
-
-          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-            <TextField
-              label="Ширина"
-              type="number"
-              value={width}
-              onChange={(event) => handleDimensionChange(Number(event.target.value), 'width')}
-              inputProps={{ min: 1, max: 10000 }}
-              fullWidth
-            />
-            <TextField
-              label="Высота"
-              type="number"
-              value={height}
-              onChange={(event) => handleDimensionChange(Number(event.target.value), 'height')}
-              inputProps={{ min: 1, max: 10000 }}
-              fullWidth
-            />
-          </Stack>
-
-          <Box>
-            <Typography variant="caption">Алгоритм интерполяции</Typography>
-            <select
-              value={interpolation}
-              onChange={(event) => setInterpolation(event.target.value as InterpolationMode)}
-              title="Билинейная интерполяция лучше сохраняет границы и плавность. Ближайший сосед — резкий и «пиксельный»."
-              style={{ width: '100%', padding: '12px 10px', borderRadius: 6, border: '1px solid #d0d0d0', marginTop: 6 }}
-            >
-              {INTERPOLATION_MODES.map((mode) => (
-                <option key={mode} value={mode}>
-                  {mode === 'nearest' ? 'Ближайший сосед' : 'Билинейная интерполяция'}
-                </option>
-              ))}
-            </select>
-          </Box>
-
-          <Typography variant="caption" sx={{ color: '#666' }}>
-            Размер до: {imageWidth}×{imageHeight}px • после: {Math.round(width)}×{Math.round(height)}px • {((Math.round(width) * Math.round(height)) / 1_000_000).toFixed(2)} Мп
-          </Typography>
-        </Stack>
-
-        <Stack direction="row" spacing={2} justifyContent="flex-end" sx={{ mt: 3 }}>
-          <Button variant="outlined" onClick={onClose}>Отмена</Button>
-          <Button variant="contained" onClick={applySize}>Применить</Button>
-        </Stack>
-      </Box>
-    </dialog>
+      <label className="field">
+        <span>
+          Интерполяция{' '}
+          <span className="tooltip" tabIndex={0} aria-label={interpolator.description}>
+            ?<span className="tooltip__bubble" role="tooltip">
+              <b>{interpolator.name}.</b> {interpolator.description}
+            </span>
+          </span>
+        </span>
+        <select value={mode} onChange={(e) => setMode(e.target.value)}>
+          {INTERPOLATORS.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}
+            </option>
+          ))}
+        </select>
+      </label>
+    </Modal>
   );
 }
